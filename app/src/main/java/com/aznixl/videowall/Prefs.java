@@ -23,7 +23,8 @@ public final class Prefs {
     // 音频
     public static final int AUDIO_ALL = 0;     // 四路同时出声
     public static final int AUDIO_FOCUS = 1;   // 只让选中格出声
-    public static final int AUDIO_MUTE = 2;    // 全部静音
+    // 曾经有过 AUDIO_MUTE = 2。按需求砍掉了 ——
+    // 但老装机上可能还存着 2，getter 里夹一下顺序，避免落到"两档都不是"的尴尬值。
 
     // 文件夹排序
     public static final int FOLDER_BY_COUNT = 0;
@@ -170,7 +171,9 @@ public final class Prefs {
     // ---- 音频
 
     public int audioMode() {
-        return sp.getInt("audio", AUDIO_ALL);
+        // 夹一下：老装机上可能还存着已废弃的 2（静音），落到 0（全部出声）
+        int v = sp.getInt("audio", AUDIO_ALL);
+        return (v == AUDIO_FOCUS) ? AUDIO_FOCUS : AUDIO_ALL;
     }
 
     public void setAudioMode(int v) {

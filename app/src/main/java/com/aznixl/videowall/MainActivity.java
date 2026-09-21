@@ -170,8 +170,8 @@ public class MainActivity extends AppCompatActivity {
     private TextView breadcrumb;
     private LinearLayout slotsBar;
     private TextView startButton;
-    /** 顶栏的主题切换键（显示当前档位）。 */
-    private TextView themeButton;
+    /** 顶栏的主题切换键（图标表示当前是亮色还是暗色）。 */
+    private ImageView themeButton;
     /** 顶栏的文件夹排布切换键（图标）。 */
     private ImageView layoutToggleButton;
 
@@ -180,8 +180,12 @@ public class MainActivity extends AppCompatActivity {
     private GridLayout grid;
     private LinearLayout topBar;
     private final Cell[] cells = new Cell[MAX_CELLS];
-    private TextView audioButton;
-    private TextView layoutButton;
+    private ImageView audioButton;
+    private ImageView layoutButton;
+    /** 播放页顶栏的「播放/暂停」全局键（图标随在播状态变）。 */
+    private ImageView playPauseAllButton;
+    /** 上一次的"有没有在播"，用来避免每 400ms 无脑换图标。 */
+    private boolean lastAnyPlaying = true;
     private boolean playing;
     private int focused;
     private boolean controlsVisible = true;
@@ -994,20 +998,13 @@ public class MainActivity extends AppCompatActivity {
         refreshPickUi();
     }
 
-    /** 刷新选择页顶栏两个切换键的显示（图标/文字都表示"当前是什么"）。 */
+    /** 刷新选择页顶栏两个切换键的图标（都表示"当前是什么"）。 */
     private void syncTopButtons() {
         if (themeButton != null) {
-            switch (prefs.themeMode()) {
-                case Prefs.THEME_LIGHT:
-                    themeButton.setText("亮色");
-                    break;
-                case Prefs.THEME_DARK:
-                    themeButton.setText("暗色");
-                    break;
-                default:
-                    themeButton.setText("跟随");
-                    break;
-            }
+            boolean dark = (getResources().getConfiguration().uiMode
+                    & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                    == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+            themeButton.setImageResource(dark ? R.drawable.ic_dark_mode : R.drawable.ic_light_mode);
         }
         if (layoutToggleButton != null) {
             layoutToggleButton.setImageResource(prefs.folderGrid()
@@ -1034,17 +1031,16 @@ public class MainActivity extends AppCompatActivity {
         title.getPaint().setFakeBoldText(true);
         top.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        // 顶栏三个操作键：主题切换、文件夹排布切换、设置。
-        // 原来这里还有个「已选 n/4」文本，去掉给按钮腾位置 ——
-        // 选了几个看底部槽位和「开始播放 · N 路」就知道了，重复。
-        themeButton = pill("亮色", null);
-        themeButton.setOnClickListener(v -> toggleTheme());
+        // 顶栏三个操作键，全用图标：主题切换、文件夹排布切换、设置。
+        // 纯文字按钮在标题旁边显得散，图标紧凑也更容易一眼认出来。
+        themeButton = pillIcon(R.drawable.ic_light_mode, v -> toggleTheme());
         top.addView(themeButton);
 
         layoutToggleButton = pillIcon(R.drawable.ic_view_list, v -> toggleFolderGrid());
         top.addView(layoutToggleButton);
 
-        top.addView(pill("设置", v -> startActivity(new Intent(this, SettingsActivity.class))));
+        top.addView(pillIcon(R.drawable.ic_settings,
+                v -> startActivity(new Intent(this, SettingsActivity.class))));
         col.addView(top);
 
         breadcrumb = new TextView(this);
@@ -1326,12 +1322,101 @@ public class MainActivity extends AppCompatActivity {
     }
 
     // ---- 视频列表（多选）
+    //
+    // 排布跟着首页那个列表/网格开关走：首页用网格，进来也是网格 ——
+    // 否则"我选了网格，点进文件夹又变回一列"，观感上就是没生效。
 
     private void renderVideos(Folder f) {
         listContainer.removeAllViews();
-        for (Item it : f.items) {
-            listContainer.addView(videoRow(it));
+        if (prefs.folderGrid()) {
+            for (int i = 0; i < f.items.size(); i += 2) {
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+                rlp.setMargins(0, d(4), 0, d(4));
+                row.setLayoutParams(rlp);
+                for (int k = 0; k < 2; k++) {
+                    LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
+                    clp.setMargins(k == 0 ? 0 : d(4), 0, k == 0 ? d(4) : 0, 0);
+                    if (i + k < f.items.size()) {
+                        row.addView(videoCard(f.items.get(i + k)), clp);
+                    } else {
+                        row.addView(new View(this), clp);
+                    }
+                }
+                listContainer.addView(row);
+            }
+        } else {
+            for (Item it : f.items) {
+                listContainer.addView(videoRow(it));
+            }
         }
+    }
+
+    /** 两列网格里的视频卡：缩略图（右上角带勾）+ 文件名 + 时长/大小。 */
+    private View videoCard(Item it) {
+        boolean selected = picked.contains(it);
+
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        v.setPadding(d(6), d(6), d(6), d(8));
+        card(v);
+        if (selected) {
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(CHIP_ON);
+            bg.setCornerRadius(12 * dp);
+            bg.setStroke(d(2), ACCENT);
+            v.setBackground(bg);
+        }
+
+        // 缩略图 + 右上角勾选标记：用 FrameLayout 叠上去。
+        // 高度写死 —— 建视图时拿不到卡片宽度，2 列在 360dp 屏上约 165dp 宽，
+        // 16:9 就是 ~92dp。
+        FrameLayout thumbBox = new FrameLayout(this);
+        v.addView(thumbBox, new LinearLayout.LayoutParams(-1, d(92)));
+
+        ImageView th = new ImageView(this);
+        th.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        GradientDrawable tbg = new GradientDrawable();
+        tbg.setColor(CHIP);
+        tbg.setCornerRadius(9 * dp);
+        th.setBackground(tbg);
+        th.setClipToOutline(true);
+        thumbBox.addView(th, new FrameLayout.LayoutParams(-1, -1));
+        if (prefs.showThumbnails()) loadThumb(it, th);
+
+        TextView check = new TextView(this);
+        check.setText(selected ? "✓" : "");
+        check.setTextSize(13);
+        check.setTextColor(Color.WHITE);
+        check.setGravity(Gravity.CENTER);
+        GradientDrawable cb = new GradientDrawable();
+        cb.setColor(selected ? ACCENT : 0x66000000);
+        cb.setShape(GradientDrawable.OVAL);
+        check.setBackground(cb);
+        FrameLayout.LayoutParams cLp = new FrameLayout.LayoutParams(d(24), d(24));
+        cLp.gravity = Gravity.TOP | Gravity.END;
+        cLp.setMargins(0, d(5), d(5), 0);
+        thumbBox.addView(check, cLp);
+
+        TextView n = new TextView(this);
+        n.setText(it.name);
+        n.setTextColor(TEXT_PRIMARY);
+        n.setTextSize(12);
+        n.setMaxLines(2);
+        n.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(-1, -2);
+        nlp.setMargins(0, d(8), 0, 0);
+        v.addView(n, nlp);
+
+        TextView m = new TextView(this);
+        m.setText(mmss(it.durationMs) + "  " + it.size);
+        m.setTextColor(MUTED);
+        m.setTextSize(11);
+        v.addView(m, new LinearLayout.LayoutParams(-1, -2));
+
+        v.setOnClickListener(x -> togglePick(it));
+        return v;
     }
 
     private View videoRow(Item it) {
@@ -1441,53 +1526,48 @@ public class MainActivity extends AppCompatActivity {
         topBar.setOrientation(LinearLayout.HORIZONTAL);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
         topBar.setBackgroundColor(OVER_VIDEO_SCRIM);
-        topBar.addView(pillFlat("‹ 返回", v -> exitPlayMode()));
+        topBar.addView(pillIconFlat(R.drawable.ic_back, v -> exitPlayMode()));
 
-        // 顶栏只留 5 个键：返回 · 暂停 · 播放 · 布局 · 音频。
-        //
-        // 暂停与播放拆成两个键而不是一个切换键：切换键的"当前状态"要靠文字去猜，
-        // 拆开之后点哪个就是哪个，不用看标签。
-        //
-        // 后 4 个键放在横向滚动容器里 —— 正常字号下 360dp 刚好放得下、看不到滚动，
-        // 但用户把系统字体调大时不会把键挤掉。
-        LinearLayout restKeys = new LinearLayout(this);
-        restKeys.setOrientation(LinearLayout.HORIZONTAL);
-        restKeys.setGravity(Gravity.CENTER_VERTICAL);
-        HorizontalScrollView keyScroller = new HorizontalScrollView(this);
-        keyScroller.setHorizontalScrollBarEnabled(false);
-        keyScroller.addView(restKeys);
-        topBar.addView(keyScroller, new LinearLayout.LayoutParams(0, -2, 1f));
-
-        restKeys.addView(pillFlat("⏸ 暂停", v -> {
+        // 播放/暂停合成一个键：图标显示"点它会做什么"（在播就显示暂停）
+        playPauseAllButton = pillIconFlat(R.drawable.ic_pause, v -> {
+            boolean anyPlaying = false;
             for (Cell c : cells) {
-                if (mpIsPlaying(c)) mpPause(c);
+                if (mpIsPlaying(c)) anyPlaying = true;
+            }
+            for (Cell c : cells) {
+                if (c == null || c.mp == null) continue;
+                if (anyPlaying) mpPause(c);
+                else mpStart(c);
+            }
+            updateCellChrome();
+            showControls();
+        });
+        topBar.addView(playPauseAllButton);
+
+        // 全部重播
+        topBar.addView(pillIconFlat(R.drawable.ic_replay, v -> {
+            for (Cell c : cells) {
+                if (c == null || c.mp == null) continue;
+                mpSeekTo(c, 0);
+                mpStart(c);
             }
             updateCellChrome();
             showControls();
         }));
-        restKeys.addView(pillFlat("▶ 播放", v -> {
-            for (Cell c : cells) {
-                if (c != null && c.mp != null) mpStart(c);
-            }
-            updateCellChrome();
-            showControls();
-        }));
 
-        // 布局键直接显示当前排布（2×2 / 1×4），比"排布·2×2"短，5 个键才放得下
-        layoutButton = pillFlat("2×2", null);
-        layoutButton.setOnClickListener(v -> {
+        // 布局切换：图标表示"当前是什么排布"
+        layoutButton = pillIconFlat(R.drawable.ic_view_grid, v -> {
             // 放大态下排布被那一格占着，先退出放大，否则改了排布看不出任何变化
             if (zoomed >= 0) restoreFromZoom();
             prefs.setLayoutMode(prefs.layoutMode() == Prefs.LAYOUT_ROW ? Prefs.LAYOUT_GRID : Prefs.LAYOUT_ROW);
             applyLayoutMode(true);
             showControls();
         });
-        restKeys.addView(layoutButton);
+        topBar.addView(layoutButton);
 
-        // 音频键点一下循环切换。切到"单路"时给一次提示，否则用户不知道该点哪格出声。
-        audioButton = pillFlat("音频", null);
-        audioButton.setOnClickListener(v -> {
-            int next = (prefs.audioMode() + 1) % 3;
+        // 音频切换：只有两档（全部 / 单路）—— 静音那一档去掉了，按需求砍的
+        audioButton = pillIconFlat(R.drawable.ic_volume_up, v -> {
+            int next = prefs.audioMode() == Prefs.AUDIO_ALL ? Prefs.AUDIO_FOCUS : Prefs.AUDIO_ALL;
             prefs.setAudioMode(next);
             applyAudio();
             syncQuickButtons();
@@ -1496,7 +1576,7 @@ public class MainActivity extends AppCompatActivity {
                 toast("单路：点哪一格，哪一格出声");
             }
         });
-        restKeys.addView(audioButton);
+        topBar.addView(audioButton);
 
         FrameLayout.LayoutParams tbLp = new FrameLayout.LayoutParams(-1, -2);
         tbLp.gravity = Gravity.TOP;
@@ -1932,12 +2012,12 @@ public class MainActivity extends AppCompatActivity {
 
     private void syncQuickButtons() {
         if (audioButton != null) {
-            int m = prefs.audioMode();
-            audioButton.setText(m == Prefs.AUDIO_ALL ? "音频·全部"
-                    : m == Prefs.AUDIO_FOCUS ? "音频·单路" : "音频·静音");
+            audioButton.setImageResource(prefs.audioMode() == Prefs.AUDIO_ALL
+                    ? R.drawable.ic_volume_up : R.drawable.ic_headset);
         }
         if (layoutButton != null) {
-            layoutButton.setText(prefs.layoutMode() == Prefs.LAYOUT_ROW ? "1×4" : "2×2");
+            layoutButton.setImageResource(prefs.layoutMode() == Prefs.LAYOUT_ROW
+                    ? R.drawable.ic_view_list : R.drawable.ic_view_grid);
         }
     }
 
@@ -2407,10 +2487,8 @@ public class MainActivity extends AppCompatActivity {
         for (int i = 0; i < MAX_CELLS; i++) {
             Cell c = cells[i];
             if (c == null) continue;
-            float v;
-            if (mode == Prefs.AUDIO_MUTE) v = 0f;
-            else if (mode == Prefs.AUDIO_FOCUS) v = (i == focused) ? 1f : 0f;
-            else v = 1f;
+            // 只有两档：全部出声 / 只让选中格出声（静音那档按需求砍掉了）
+            float v = (mode == Prefs.AUDIO_FOCUS) ? ((i == focused) ? 1f : 0f) : 1f;
             mpVolume(c, v);
         }
         // 选中格的强调边框要跟着"控制条显不显示"一起变，统一在 updateCellChrome 里画
@@ -2467,6 +2545,20 @@ public class MainActivity extends AppCompatActivity {
 
                 // 编号没底色了，选中改成变白（配上面那道强调描边，一眼看出是这一格）
                 c.badge.setTextColor(highlight ? Color.WHITE : ACCENT);
+            }
+        }
+
+        // 顶栏「播放/暂停」的图标跟着在播状态变。
+        // 这里被 ticker 每 400ms 调一次，只在状态真变了才换图，免得白刷。
+        if (playPauseAllButton != null) {
+            boolean anyPlaying = false;
+            for (Cell c : cells) {
+                if (mpIsPlaying(c)) anyPlaying = true;
+            }
+            if (anyPlaying != lastAnyPlaying) {
+                lastAnyPlaying = anyPlaying;
+                playPauseAllButton.setImageResource(anyPlaying
+                        ? R.drawable.ic_pause : R.drawable.ic_play);
             }
         }
     }
@@ -2825,32 +2917,29 @@ public class MainActivity extends AppCompatActivity {
         return iv;
     }
 
-    /** 播放页顶栏用的紧凑药丸键。padding/margin 压得比 pick 页小 —— 5 个键要挤进 360dp。 */
-    private TextView pillFlat(String text, View.OnClickListener l) {
-        TextView b = new TextView(this);
-        b.setText(text);
-        b.setTextColor(Color.WHITE);
-        b.setTextSize(12);
-        b.setGravity(Gravity.CENTER);
-        b.setPadding(d(10), d(8), d(10), d(8));
-        b.setSingleLine(true);
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(OVER_VIDEO_CHIP);
-        bg.setCornerRadius(50 * dp);
-        b.setBackground(bg);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-        lp.setMargins(d(3), 0, d(3), 0);
-        b.setLayoutParams(lp);
-        b.setOnClickListener(l);
-        return b;
-    }
-
     /**
      * 逐格控制条上的文字键。
      *
      * 尺寸压得比别处小：2×2 在 360dp 竖屏下每格只有约 178dp 宽，
      * 而这一排要放下 4 个键（−10 / ▶‖ / +10 / 全屏），每个连同间距不能超过 44dp。
      */
+    /** 播放页顶栏的图标键。压视频上，所以用半透明白底（不跟主题走）。 */
+    private ImageView pillIconFlat(int drawableRes, View.OnClickListener l) {
+        ImageView iv = new ImageView(this);
+        iv.setImageResource(drawableRes);
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        iv.setPadding(d(9), d(9), d(9), d(9));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(OVER_VIDEO_CHIP);
+        bg.setCornerRadius(50 * dp);
+        iv.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(d(38), d(38));
+        lp.setMargins(d(4), 0, d(4), 0);
+        iv.setLayoutParams(lp);
+        iv.setOnClickListener(l);
+        return iv;
+    }
+
     private TextView miniButton(String text, View.OnClickListener l) {
         TextView b = new TextView(this);
         b.setText(text);

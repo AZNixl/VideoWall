@@ -234,7 +234,7 @@ public class SettingsActivity extends AppCompatActivity {
         section("音频");
 
         choice("音频模式", audioHint(),
-                new String[]{"四路同时出声", "只让选中格出声", "全部静音"},
+                new String[]{"四路同时出声", "只让选中格出声"},
                 prefs.audioMode(),
                 prefs::setAudioMode);
 
@@ -358,10 +358,9 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private String audioHint() {
-        int m = prefs.audioMode();
-        if (m == Prefs.AUDIO_ALL) return "四路音频同时响，由系统混音";
-        if (m == Prefs.AUDIO_FOCUS) return "只让当前选中格出声，其余静音";
-        return "四路全部静音";
+        return prefs.audioMode() == Prefs.AUDIO_FOCUS
+                ? "只让当前选中格出声，其余静音"
+                : "四路音频同时响，由系统混音";
     }
 
     private static int indexOfTimeout(int ms) {
