@@ -34,6 +34,7 @@ public final class Prefs {
     public static final int VIDEO_BY_DATE = 0;
     public static final int VIDEO_BY_NAME = 1;
     public static final int VIDEO_BY_DURATION = 2;
+    public static final int VIDEO_BY_SIZE = 3;
 
     /** 控制条自动隐藏的候选时长（毫秒），0 = 从不隐藏。 */
     public static final int[] HIDE_TIMEOUTS = {0, 2000, 4000, 8000};
@@ -264,6 +265,28 @@ public final class Prefs {
 
     public void setFolderSort(int v) {
         sp.edit().putInt("folderSort", v).apply();
+    }
+
+    /**
+     * 升序还是降序。默认**降序** —— 因为这个开关的含义随排序依据变：
+     * 按数量降序＝最多的在前，按日期降序＝最新的在前，两个默认都是合理的。
+     * （界面上不写"升序/降序"，而是按依据显示 A-Z / Z-A、最短 / 最长优先…，
+     *   和 NextPlayer 的做法一致。）
+     */
+    public boolean folderSortAsc() {
+        return sp.getBoolean("folderSortAsc", false);
+    }
+
+    public void setFolderSortAsc(boolean v) {
+        sp.edit().putBoolean("folderSortAsc", v).apply();
+    }
+
+    public boolean videoSortAsc() {
+        return sp.getBoolean("videoSortAsc", false);
+    }
+
+    public void setVideoSortAsc(boolean v) {
+        sp.edit().putBoolean("videoSortAsc", v).apply();
     }
 
     /** 首页文件夹用两列网格还是单列列表。 */

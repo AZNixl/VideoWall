@@ -13,6 +13,7 @@ import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.media.AudioManager;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
 import android.media.MediaExtractor;
@@ -30,7 +31,9 @@ import android.provider.Settings;
 import android.util.DisplayMetrics;
 import android.util.Log;
 import android.util.Size;
+import android.view.GestureDetector;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowInsets;
@@ -50,12 +53,18 @@ import android.widget.VideoView;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.app.AppCompatDelegate;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
+import java.io.BufferedReader;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -78,6 +87,8 @@ public class MainActivity extends AppCompatActivity {
     /** 排布最多用到的行数（2×2、以及「铺满」时 1 大 2 小 / 上下两分）。 */
     private static final int MAX_ROWS = 2;
     private static final int REQ_PERM = 1001;
+    /** 用 SAF 让用户选一个字幕文件。 */
+    private static final int REQ_PICK_SRT = 1002;
     private static final int THUMB_CACHE_LIMIT = 120;
     private static final long SEEK_STEP_MS = 10_000L;
 
@@ -151,6 +162,8 @@ public class MainActivity extends AppCompatActivity {
     private boolean loading = true;
     /** 媒体库只会加载一次；介绍页和 onResume 都可能触发，得防重入。 */
     private boolean libraryLoadStarted;
+    /** 首页的下拉刷新容器。 */
+    private SwipeRefreshLayout pickRefresh;
     /** 本次启动是否已经弹过一次系统权限框 —— 用来区分"还没问过"和"问过被拒了"。 */
     private boolean permAskedOnce;
     /** onCreate 时用的主题档位；onResume 发现设置变了就重建自己。 */
@@ -186,6 +199,34 @@ public class MainActivity extends AppCompatActivity {
     private ImageView playPauseAllButton;
     /** 上一次的"有没有在播"，用来避免每 400ms 无脑换图标。 */
     private boolean lastAnyPlaying = true;
+
+    // ---- 单视频专属：手势 + A-B 循环 + 字幕
+    //
+    // 这些只在"屏幕上只有一路视频"时启用（只选了 1 个，或把某一路放大到全屏）。
+    // 多路时沿用原来的交互 —— 四宫格里做全屏手势既没地方滑，也容易误触。
+
+    /** A-B 循环的两个点（毫秒）。abA < 0 表示没设。 */
+    private long abA = -1;
+    private long abB = -1;
+    /** 字幕：已解析出的条目。下标一一对应。 */
+    private final List<long[]> subCues = new ArrayList<>();
+    private final List<String> subTexts = new ArrayList<>();
+    private boolean subOn;
+    /** 字幕文字层。 */
+    private TextView subLabel;
+    /** 记住"哪个视频配了哪个字幕文件"，用 ActionOpenDocument 拿到的 URI。 */
+    private final Map<Long, String> subUriByVideo = new HashMap<>();
+
+    private ImageView abButton;
+    private ImageView subtitleButton;
+    private AudioManager audioManager;
+
+    /** 手势提示浮层（调亮度/音量时中间弹一下）。 */
+    private TextView gestureHud;
+    private float gStartY;
+    private float gStartValue;
+    private float gStartXb;
+    private boolean gMoved;
     private boolean playing;
     private int focused;
     private boolean controlsVisible = true;
@@ -218,6 +259,8 @@ public class MainActivity extends AppCompatActivity {
         final long id;
         final String name;
         final String size;
+        /** 原始字节数。`size` 是给人看的格式化串，排序得用这个。 */
+        long sizeBytes;
         final long durationMs;
         final long dateAdded;
         final long bucketId;
@@ -240,6 +283,12 @@ public class MainActivity extends AppCompatActivity {
             this.dateAdded = dateAdded;
             this.bucketId = bucketId;
             this.bucketName = bucketName;
+        }
+
+        /** 链式补一个原始字节数（构造参数已经够多了，不想再加一个）。 */
+        Item withSize(long bytes) {
+            this.sizeBytes = bytes;
+            return this;
         }
 
         Uri uri() {
@@ -283,6 +332,9 @@ public class MainActivity extends AppCompatActivity {
         /** 这一格已被作废（reset 过或已解码失败）。迟到的 onPrepared 一律不再当作有效事件。 */
         boolean stale;
         String name = "";
+        /** 媒体库里的 id 与原始文件名 —— 字幕要靠它们找"同名 .srt"。 */
+        long videoId = -1;
+        String displayName = "";
 
         void reset() {
             // 顺序很关键：先 pause()，再 stopPlayback()。
@@ -457,6 +509,26 @@ public class MainActivity extends AppCompatActivity {
         } else {
             toast("没有媒体读取权限，无法列出视频");
         }
+    }
+
+    /**
+     * 选完字幕文件。
+     *
+     * 这里**故意不 takePersistableUriPermission** —— 字幕只在本次播放里用，
+     * 用完即弃；持久授权会一直占着那个文件的读权限，没必要。
+     */
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_PICK_SRT || resultCode != RESULT_OK || data == null) return;
+        Uri uri = data.getData();
+        if (uri == null) return;
+        if (!loadSrt(uri)) return;
+        int idx = gestureCell();
+        if (idx >= 0 && idx < MAX_CELLS && cells[idx] != null) {
+            subUriByVideo.put(cells[idx].videoId, uri.toString());
+        }
+        showControls();
     }
 
     @Override
@@ -1003,6 +1075,153 @@ public class MainActivity extends AppCompatActivity {
         refreshPickUi();
     }
 
+    // ------------------------------------------------- 浏览设置弹窗（排布 + 排序）
+
+    /** 弹窗里的一行选择回调。 */
+    private interface OnPick {
+        void on(int index);
+    }
+
+    /**
+     * 「浏览设置」弹窗：排布 + 文件夹排序 + 视频排序。
+     *
+     * 词汇和选项划分参考 NextPlayer 的 QuickSettingsDialog：
+     * 排序顺序不写"升序/降序"，而是按排序依据显示 A-Z / Z-A、最短优先 / 最长优先……
+     * —— 对用户来说"最少优先"比"升序"好懂得多。
+     */
+    private void showBrowseDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(d(20), d(4), d(20), d(4));
+
+        fillBrowseDialog(box);
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("浏览设置")
+                .setView(box)
+                .setPositiveButton("完成", null)
+                .show();
+    }
+
+    /** 重建弹窗内容。任何一项改了都整体重建一次 —— 项很少，比逐项刷状态简单可靠。 */
+    private void fillBrowseDialog(LinearLayout box) {
+        box.removeAllViews();
+
+        box.addView(browseSection("排布"));
+        box.addView(browseChips(new String[]{"单列列表", "两列网格"},
+                prefs.folderGrid() ? 1 : 0,
+                i -> {
+                    prefs.setFolderGrid(i == 1);
+                    syncTopButtons();
+                    refreshPickUi();
+                    fillBrowseDialog(box);
+                }));
+
+        box.addView(browseSection("文件夹排序"));
+        box.addView(browseChips(new String[]{"名称", "数量"},
+                prefs.folderSort() == Prefs.FOLDER_BY_NAME ? 0 : 1,
+                i -> {
+                    prefs.setFolderSort(i == 0 ? Prefs.FOLDER_BY_NAME : Prefs.FOLDER_BY_COUNT);
+                    resortAndRefresh();
+                    fillBrowseDialog(box);
+                }));
+        box.addView(browseChips(new String[]{folderOrderLabel()}, 0, i -> {
+            prefs.setFolderSortAsc(!prefs.folderSortAsc());
+            resortAndRefresh();
+            fillBrowseDialog(box);
+        }));
+
+        box.addView(browseSection("视频排序"));
+        box.addView(browseChips(new String[]{"名称", "时长", "大小", "日期"},
+                videoSortIndex(),
+                i -> {
+                    prefs.setVideoSort(new int[]{Prefs.VIDEO_BY_NAME, Prefs.VIDEO_BY_DURATION,
+                            Prefs.VIDEO_BY_SIZE, Prefs.VIDEO_BY_DATE}[i]);
+                    resortAndRefresh();
+                    fillBrowseDialog(box);
+                }));
+        box.addView(browseChips(new String[]{videoOrderLabel()}, 0, i -> {
+            prefs.setVideoSortAsc(!prefs.videoSortAsc());
+            resortAndRefresh();
+            fillBrowseDialog(box);
+        }));
+    }
+
+    private int videoSortIndex() {
+        switch (prefs.videoSort()) {
+            case Prefs.VIDEO_BY_NAME:
+                return 0;
+            case Prefs.VIDEO_BY_DURATION:
+                return 1;
+            case Prefs.VIDEO_BY_SIZE:
+                return 2;
+            default:
+                return 3;
+        }
+    }
+
+    private String folderOrderLabel() {
+        if (prefs.folderSort() == Prefs.FOLDER_BY_NAME) {
+            return prefs.folderSortAsc() ? "A → Z" : "Z → A";
+        }
+        return prefs.folderSortAsc() ? "最少优先" : "最多优先";
+    }
+
+    private String videoOrderLabel() {
+        switch (prefs.videoSort()) {
+            case Prefs.VIDEO_BY_NAME:
+                return prefs.videoSortAsc() ? "A → Z" : "Z → A";
+            case Prefs.VIDEO_BY_DURATION:
+                return prefs.videoSortAsc() ? "最短优先" : "最长优先";
+            case Prefs.VIDEO_BY_SIZE:
+                return prefs.videoSortAsc() ? "最小优先" : "最大优先";
+            default:
+                return prefs.videoSortAsc() ? "最旧优先" : "最新优先";
+        }
+    }
+
+    /** 排序或顺序变了：重排 + 重画。 */
+    private void resortAndRefresh() {
+        sortFolders();
+        sortVideosInFolders();
+        refreshPickUi();
+    }
+
+    private TextView browseSection(String text) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setTextColor(MUTED);
+        t.setTextSize(12);
+        t.setPadding(d(2), d(14), 0, d(6));
+        return t;
+    }
+
+    /** 一行可选的胶囊。选中的用强调色描边 + 强调色文字。 */
+    private LinearLayout browseChips(String[] labels, int selected, OnPick onPick) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        for (int i = 0; i < labels.length; i++) {
+            final int idx = i;
+            boolean on = i == selected;
+            TextView chip = new TextView(this);
+            chip.setText(labels[i]);
+            chip.setTextSize(13);
+            chip.setGravity(Gravity.CENTER);
+            chip.setPadding(d(14), d(8), d(14), d(8));
+            chip.setTextColor(on ? ACCENT : TEXT_PRIMARY);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(on ? CHIP_ON : CHIP);
+            bg.setCornerRadius(50 * dp);
+            bg.setStroke(d(on ? 2 : 0), ACCENT);
+            chip.setBackground(bg);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            lp.setMargins(0, 0, d(8), d(6));
+            chip.setLayoutParams(lp);
+            chip.setOnClickListener(v -> onPick.on(idx));
+            row.addView(chip);
+        }
+        return row;
+    }
+
     /** 刷新选择页顶栏两个切换键的图标（都表示"当前是什么"）。 */
     private void syncTopButtons() {
         if (themeButton != null) {
@@ -1051,7 +1270,9 @@ public class MainActivity extends AppCompatActivity {
         themeButton = pillIcon(R.drawable.ic_theme_auto, v -> toggleTheme());
         top.addView(themeButton);
 
-        layoutToggleButton = pillIcon(R.drawable.ic_view_list, v -> toggleFolderGrid());
+        // 这个键现在开的是「浏览设置」弹窗，里面既有排布也有排序 ——
+        // 单独一个"列表/网格"切换键能表达的东西太少，排序只能窝在设置页深处。
+        layoutToggleButton = pillIcon(R.drawable.ic_view_list, v -> showBrowseDialog());
         top.addView(layoutToggleButton);
 
         top.addView(pillIcon(R.drawable.ic_settings,
@@ -1072,7 +1293,15 @@ public class MainActivity extends AppCompatActivity {
         listContainer.setOrientation(LinearLayout.VERTICAL);
         listContainer.setPadding(d(10), 0, d(10), d(10));
         sv.addView(listContainer);
-        col.addView(sv, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        // 下拉刷新。媒体库是启动时一次性缓存的 —— 在别的应用里刚拍了视频、
+        // 或者刚把文件传进手机，不该非得重启应用才看得到。
+        pickRefresh = new SwipeRefreshLayout(this);
+        pickRefresh.addView(sv);
+        pickRefresh.setColorSchemeColors(ACCENT);
+        pickRefresh.setProgressBackgroundColorSchemeColor(CARD);
+        pickRefresh.setOnRefreshListener(this::reloadLibrary);
+        col.addView(pickRefresh, new LinearLayout.LayoutParams(-1, 0, 1f));
 
         pickBottomBar = new LinearLayout(this);
         pickBottomBar.setOrientation(LinearLayout.VERTICAL);
@@ -1186,6 +1415,7 @@ public class MainActivity extends AppCompatActivity {
         for (Item it : allItems) {
             if (!hidden.containsKey(it.bucketId)) all.items.add(it);
         }
+        Collections.sort(all.items, itemComparator());
         show.add(all);
         counts.add(all.items.size());
 
@@ -1646,9 +1876,46 @@ public class MainActivity extends AppCompatActivity {
         });
         topBar.addView(audioButton);
 
+        // 单视频专属的两个键。多路时隐藏 —— 四宫格里做 A-B 和字幕意义不大，
+        // 顶栏也只有一路独占时才腾得出位置。
+        abButton = pillIconFlat(R.drawable.ic_ab_repeat, v -> cycleAb());
+        topBar.addView(abButton);
+
+        subtitleButton = pillIconFlat(R.drawable.ic_subtitles, v -> onSubtitleButton());
+        topBar.addView(subtitleButton);
+
         FrameLayout.LayoutParams tbLp = new FrameLayout.LayoutParams(-1, -2);
         tbLp.gravity = Gravity.TOP;
         f.addView(topBar, tbLp);
+
+        // 字幕文字层。放在画面下方偏上一点 —— 太靠下会被逐格控制条压住。
+        subLabel = new TextView(this);
+        subLabel.setTextSize(16);
+        subLabel.setTextColor(Color.WHITE);
+        subLabel.setGravity(Gravity.CENTER);
+        subLabel.setLineSpacing(0, 1.15f);
+        subLabel.setShadowLayer(6f, 0f, 2f, 0xFF000000);
+        subLabel.setPadding(d(16), d(6), d(16), d(6));
+        subLabel.setVisibility(View.GONE);
+        FrameLayout.LayoutParams subLp = new FrameLayout.LayoutParams(-1, -2);
+        subLp.gravity = Gravity.BOTTOM;
+        subLp.bottomMargin = d(96);
+        f.addView(subLabel, subLp);
+
+        // 手势提示浮层（亮度/音量）。放正中，滑完自己淡出。
+        gestureHud = new TextView(this);
+        gestureHud.setTextSize(13);
+        gestureHud.setTextColor(Color.WHITE);
+        gestureHud.setGravity(Gravity.CENTER);
+        gestureHud.setPadding(d(16), d(9), d(16), d(9));
+        GradientDrawable hudBg = new GradientDrawable();
+        hudBg.setColor(0xCC000000);
+        hudBg.setCornerRadius(50 * dp);
+        gestureHud.setBackground(hudBg);
+        gestureHud.setVisibility(View.GONE);
+        FrameLayout.LayoutParams hudLp = new FrameLayout.LayoutParams(-2, -2);
+        hudLp.gravity = Gravity.CENTER;
+        f.addView(gestureHud, hudLp);
 
         // 不再单独做「菜单把手」。
         //
@@ -1685,9 +1952,79 @@ public class MainActivity extends AppCompatActivity {
         c.tapCatcher = new View(this);
         c.tapCatcher.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
         c.tapCatcher.setBackgroundColor(Color.TRANSPARENT);
-        c.tapCatcher.setOnClickListener(v -> {
-            Log.d(TAG, "tap#catcher cell=" + index);
-            onCellTap(index);
+
+        // 手势分两套：
+        //   多路 —— 点一下就是"选中这一格"，立刻生效，不等双击判定
+        //   单路 —— 单击暂停 / 双击快进 / 左右半屏上下滑调亮度·音量
+        //
+        // 单路必须走 onSingleTapConfirmed（等 ~300ms 看是不是双击），
+        // 多路等这 300ms 就纯属拖慢手感，所以用 onSingleTapUp 分开处理。
+        final GestureDetector gd = new GestureDetector(this,
+                new GestureDetector.SimpleOnGestureListener() {
+                    @Override
+                    public boolean onDown(MotionEvent e) {
+                        return true;    // 收下 DOWN，后面的回调才来
+                    }
+
+                    @Override
+                    public boolean onSingleTapUp(MotionEvent e) {
+                        if (singleMode()) return true;
+                        Log.d(TAG, "tap#catcher cell=" + index);
+                        onCellTap(index);
+                        return true;
+                    }
+
+                    @Override
+                    public boolean onSingleTapConfirmed(MotionEvent e) {
+                        if (!singleMode()) return true;
+                        Log.d(TAG, "tap#pause cell=" + index);
+                        toggleCell(index);
+                        showControls();
+                        return true;
+                    }
+
+                    @Override
+                    public boolean onDoubleTap(MotionEvent e) {
+                        if (!singleMode()) return true;
+                        Log.d(TAG, "tap#seek10 cell=" + index);
+                        seekBy(index, SEEK_STEP_MS);
+                        flashHud("快进 10 秒");
+                        return true;
+                    }
+                });
+
+        c.tapCatcher.setOnTouchListener((v, ev) -> {
+            gd.onTouchEvent(ev);
+            if (!singleMode()) return true;         // 多路：手势逻辑全不参与
+            switch (ev.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    gStartXb = ev.getX();
+                    gStartY = ev.getY();
+                    gMoved = false;
+                    if (audioManager == null) {
+                        audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+                    }
+                    gStartValue = (ev.getX() < v.getWidth() / 2f)
+                            ? currentBrightness()
+                            : audioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
+                    break;
+                case MotionEvent.ACTION_MOVE:
+                    float dy = gStartY - ev.getY();
+                    if (!gMoved && Math.abs(dy) > d(14)) gMoved = true;
+                    if (gMoved) onGestureMove(v, dy, v.getWidth());
+                    break;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    if (gMoved) {
+                        gMoved = false;
+                        ui.removeCallbacks(hideHudTask);
+                        ui.postDelayed(hideHudTask, 500);
+                    }
+                    break;
+                default:
+                    break;
+            }
+            return true;
         });
         cell.addView(c.tapCatcher);
 
@@ -1959,6 +2296,390 @@ public class MainActivity extends AppCompatActivity {
         showControls();
     }
 
+    // ------------------------------------------------- 单视频专属：手势 / A-B / 字幕
+
+    /** 屏幕上是不是只有一路视频（只选了一个，或把某一路放大到全屏）。 */
+    private boolean singleMode() {
+        return assignedCount == 1 || (zoomed >= 0 && zoomed < MAX_CELLS);
+    }
+
+    /** 单视频手势作用的格子。 */
+    private int gestureCell() {
+        return (zoomed >= 0) ? zoomed : focused;
+    }
+
+    /**
+     * 手势：左半屏上下滑调亮度、右半屏上下滑调音量。
+     *
+     * 用"滑动起点的那一侧"决定调什么，而不是跟随手指当前所在侧 ——
+     * 手指滑到另一边时不应该中途换功能。
+     * 行程按屏高的 60% 折算成满量程，太灵敏会一格就到底。
+     */
+    private void onGestureMove(android.view.View v, float dy, float width) {
+        float frac = dy / (v.getHeight() * 0.6f);
+        boolean left = gStartXb < width / 2f;
+        if (left) {
+            float val = clampf(gStartValue + frac, 0.02f, 1f);
+            setWindowBrightness(val);
+            showGestureHud("亮度", Math.round(val * 100));
+            Log.d(TAG, "gesture brightness -> " + Math.round(val * 100) + "%");
+        } else {
+            if (audioManager == null) audioManager = (AudioManager) getSystemService(AUDIO_SERVICE);
+            int max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
+            int want = Math.round(gStartValue + frac * max);
+            want = Math.max(0, Math.min(max, want));
+            audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, want, 0);
+            showGestureHud("音量", max == 0 ? 0 : Math.round(want * 100f / max));
+            Log.d(TAG, "gesture volume -> " + want + "/" + max);
+        }
+    }
+
+    private static float clampf(float v, float lo, float hi) {
+        return v < lo ? lo : (v > hi ? hi : v);
+    }
+
+    /** 当前这一格的亮度（0..1）。窗口没设过就取系统亮度当起点。 */
+    private float currentBrightness() {
+        float w = getWindow().getAttributes().screenBrightness;
+        if (w >= 0) return w;
+        try {
+            int sys = Settings.System.getInt(getContentResolver(),
+                    Settings.System.SCREEN_BRIGHTNESS, 128);
+            return Math.max(0.02f, sys / 255f);
+        } catch (Throwable t) {
+            return 0.5f;
+        }
+    }
+
+    /** 只改本窗口的亮度，不动系统设置 —— 退出播放页时在 exitPlayMode 里还原。 */
+    private void setWindowBrightness(float v) {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = v;
+        getWindow().setAttributes(lp);
+    }
+
+    private void resetWindowBrightness() {
+        WindowManager.LayoutParams lp = getWindow().getAttributes();
+        lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
+        getWindow().setAttributes(lp);
+    }
+
+    /** 中间的提示浮层，滑完 700ms 自己消失。 */
+    private void showGestureHud(String label, int percent) {
+        flashHud(percent < 0 ? label : label + "  " + percent + "%");
+    }
+
+    private void flashHud(String text) {
+        if (gestureHud == null) return;
+        gestureHud.setText(text);
+        gestureHud.setVisibility(View.VISIBLE);
+        gestureHud.setAlpha(1f);
+        ui.removeCallbacks(hideHudTask);
+        ui.postDelayed(hideHudTask, 700);
+    }
+
+    private final Runnable hideHudTask = () -> {
+        if (gestureHud == null) return;
+        gestureHud.animate().alpha(0f).setDuration(200)
+                .withEndAction(() -> gestureHud.setVisibility(View.GONE)).start();
+    };
+
+    // -------------------------------------------------- A-B 循环
+
+    /**
+     * A-B 键：按一下从「未设」→「设了点 A」→「设了点 B，开始循环」→「清除」。
+     * 状态直接画在键上（点亮/半亮），不另外弹窗。
+     */
+    private void cycleAb() {
+        int idx = gestureCell();
+        Cell c = (idx >= 0 && idx < MAX_CELLS) ? cells[idx] : null;
+        if (c == null || c.mp == null) {
+            toast("这一格还没有视频");
+            return;
+        }
+        long pos = mpPosition(c);
+
+        if (abA < 0) {
+            abA = pos;
+            abB = -1;
+            toast("A 点已设：" + mmss(abA) + "（再按一次设 B 点）");
+        } else if (abB < 0) {
+            if (pos - abA < 1000) {
+                toast("B 点要离 A 点至少 1 秒");
+                return;
+            }
+            abB = pos;
+            toast("循环 " + mmss(abA) + " – " + mmss(abB) + "（再按一次清除）");
+        } else {
+            abA = -1;
+            abB = -1;
+            toast("已清除 A-B 循环");
+        }
+        syncSingleButtons();
+        showControls();
+    }
+
+    /** 由 ticker 调：越过 B 点就跳回 A 点。 */
+    private void enforceAbLoop() {
+        if (abA < 0 || abB <= abA || !playing) return;
+        int idx = gestureCell();
+        if (idx < 0 || idx >= MAX_CELLS) return;
+        Cell c = cells[idx];
+        if (c == null || c.mp == null || c.userSeeking || !mpIsPlaying(c)) return;
+        if (mpPosition(c) >= abB) {
+            mpSeekTo(c, (int) abA);
+        }
+    }
+
+    // -------------------------------------------------- 字幕
+
+    /**
+     * 字幕键：没加载过就去找 / 让用户选，加载过就在「显示 ⇄ 隐藏」之间切。
+     *
+     * **为什么是解析 SRT 而不是用 MediaPlayer 的定时文本轨**：
+     * 内嵌字幕轨（mov_text / 3GPP）的字节格式因封装而异，要按格式分别解析；
+     * 而实际用得到的场景九成是"视频旁边放一个同名 .srt"。自己解析 SRT 格式简单、
+     * 完全可控，渲染也只是一个随播放位置更新的 TextView，不依赖任何播放器 API。
+     */
+    private void onSubtitleButton() {
+        if (!subCues.isEmpty()) {
+            subOn = !subOn;
+            if (!subOn) subLabel.setVisibility(View.GONE);
+            syncSingleButtons();
+            toast(subOn ? "字幕：显示" : "字幕：隐藏");
+            showControls();
+            return;
+        }
+        int idx = gestureCell();
+        Cell c = (idx >= 0 && idx < MAX_CELLS) ? cells[idx] : null;
+        if (c == null || c.mp == null) {
+            toast("这一格还没有视频");
+            return;
+        }
+        String remembered = subUriByVideo.get(c.videoId);
+        if (remembered != null) {
+            if (loadSrt(Uri.parse(remembered))) return;
+            subUriByVideo.remove(c.videoId);
+        }
+        // 先试着自动找同目录同名的 .srt
+        Uri auto = findSiblingSrt(c);
+        if (auto != null && loadSrt(auto)) {
+            subUriByVideo.put(c.videoId, auto.toString());
+            return;
+        }
+        toast("没找到同名字幕，请手动选一个 .srt 文件");
+        pickSrtFile();
+    }
+
+    /** 在媒体库里找"和这个视频同目录、同主文件名"的 .srt。找不到返回 null。 */
+    private Uri findSiblingSrt(Cell c) {
+        if (c.displayName == null || c.displayName.isEmpty()) return null;
+        String base = c.displayName;
+        int dot = base.lastIndexOf('.');
+        if (dot > 0) base = base.substring(0, dot);
+        Cursor cur = null;
+        try {
+            // 这里只能查到 /storage/emulated/0 下、且已进媒体库的文件；
+            // Android 13+ 只授了 READ_MEDIA_VIDEO 时基本查不到 —— 那就走手动选文件。
+            cur = getContentResolver().query(
+                    MediaStore.Files.getContentUri("external"),
+                    new String[]{MediaStore.Files.FileColumns._ID,
+                            MediaStore.Files.FileColumns.DISPLAY_NAME},
+                    MediaStore.Files.FileColumns.DISPLAY_NAME + " LIKE ?",
+                    new String[]{base + "%.srt"},
+                    null);
+            while (cur != null && cur.moveToNext()) {
+                long id = cur.getLong(0);
+                String name = cur.getString(1);
+                if (name != null && name.equalsIgnoreCase(base + ".srt")) {
+                    return Uri.withAppendedPath(
+                            MediaStore.Files.getContentUri("external"), String.valueOf(id));
+                }
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "找同名字幕失败", t);
+        } finally {
+            if (cur != null) cur.close();
+        }
+        return null;
+    }
+
+    private void pickSrtFile() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        try {
+            startActivityForResult(i, REQ_PICK_SRT);
+        } catch (Throwable t) {
+            toast("这台设备没有可用的文件选择器");
+        }
+    }
+
+    /** 读入并解析 SRT。成功返回 true。 */
+    private boolean loadSrt(Uri uri) {
+        List<long[]> cues = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) return false;
+            byte[] raw = readAll(in);
+            // 编码要试两遍：网上下来的中文字幕有相当一部分是 GBK/GB18030，
+            // 一律按 UTF-8 读会得到满屏问号。UTF-8 解出来没有替换字符才认。
+            String text = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+            if (text.indexOf('\uFFFD') >= 0) {
+                try {
+                    text = new String(raw, "GB18030");
+                    Log.i(TAG, "字幕按 GB18030 解码");
+                } catch (Throwable ignored) {
+                }
+            }
+            parseSrt(new BufferedReader(new java.io.StringReader(text)), cues, texts);
+        } catch (Throwable t) {
+            Log.w(TAG, "读字幕失败", t);
+            return false;
+        }
+        if (cues.isEmpty()) {
+            toast("这个文件里没解析出字幕（只支持 .srt）");
+            return false;
+        }
+        subCues.clear();
+        subCues.addAll(cues);
+        subTexts.clear();
+        subTexts.addAll(texts);
+        subOn = true;
+        syncSingleButtons();
+        toast("字幕已加载，共 " + cues.size() + " 条");
+        showControls();
+        return true;
+    }
+
+    private static byte[] readAll(InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            bos.write(buf, 0, n);
+            if (bos.size() > 8 * 1024 * 1024) break;   // 字幕不该有这么大，防呆
+        }
+        return bos.toByteArray();
+    }
+
+    /**
+     * 解析 SRT 文本。格式：
+     * <pre>
+     * 1
+     * 00:00:01,000 --> 00:00:04,000
+     * 第一行
+     * 第二行
+     * （空行）
+     * </pre>
+     * 时间戳按"小时:分:秒,毫秒"解析；允许缺小时（少数工具会省）。容错优先：
+     * 解析不出来的行直接跳过，不要因为一条脏数据丢掉整个字幕。
+     */
+    private void parseSrt(BufferedReader br, List<long[]> cues, List<String> texts)
+            throws IOException {
+        String line;
+        long[] pending = null;
+        StringBuilder body = new StringBuilder();
+        while ((line = br.readLine()) != null) {
+            String s = line.trim();
+            if (s.isEmpty()) {
+                if (pending != null) {
+                    cues.add(pending);
+                    texts.add(body.toString().trim());
+                }
+                pending = null;
+                body.setLength(0);
+                continue;
+            }
+            if (s.contains("-->")) {
+                String[] parts = s.split("-->");
+                if (parts.length == 2) {
+                    long st = srtTime(parts[0].trim());
+                    long en = srtTime(parts[1].trim());
+                    if (st >= 0 && en > st) pending = new long[]{st, en};
+                }
+                continue;
+            }
+            if (pending == null) continue;      // 序号行，跳过
+            if (body.length() > 0) body.append('\n');
+            // 去掉 SRT 里常见的行内标签 <i> </i> <font ...>
+            body.append(s.replaceAll("<[^>]+>", ""));
+        }
+        if (pending != null) {
+            cues.add(pending);
+            texts.add(body.toString().trim());
+        }
+    }
+
+    /** "00:00:01,000" / "00:01,000" → 毫秒。解析不了返回 -1。 */
+    private static long srtTime(String s) {
+        try {
+            String t = s.replace(',', '.');
+            String[] hms = t.split(":");
+            double h = 0, m = 0, sec;
+            if (hms.length == 3) {
+                h = Double.parseDouble(hms[0]);
+                m = Double.parseDouble(hms[1]);
+                sec = Double.parseDouble(hms[2]);
+            } else if (hms.length == 2) {
+                m = Double.parseDouble(hms[0]);
+                sec = Double.parseDouble(hms[1]);
+            } else {
+                return -1;
+            }
+            return (long) ((h * 3600 + m * 60 + sec) * 1000);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    /** 由 ticker 调：按当前播放位置换字幕文字。 */
+    private void updateSubtitle() {
+        if (!subOn || subCues.isEmpty() || subLabel == null) return;
+        int idx = gestureCell();
+        if (idx < 0 || idx >= MAX_CELLS) return;
+        Cell c = cells[idx];
+        if (c == null || c.mp == null) return;
+        if (!singleMode()) return;
+        long pos = mpPosition(c);
+        String want = null;
+        for (int i = 0; i < subCues.size(); i++) {
+            long[] r = subCues.get(i);
+            if (pos >= r[0] && pos < r[1]) {
+                want = subTexts.get(i);
+                break;
+            }
+        }
+        if (want == null) {
+            subLabel.setVisibility(View.GONE);
+        } else {
+            subLabel.setText(want);
+            subLabel.setVisibility(View.VISIBLE);
+        }
+    }
+
+    /** A-B / 字幕两个键只在单视频时出现，图标随状态变。 */
+    private void syncSingleButtons() {
+        if (abButton == null || subtitleButton == null) return;
+        boolean single = singleMode();
+        abButton.setVisibility(single ? View.VISIBLE : View.GONE);
+        subtitleButton.setVisibility(single ? View.VISIBLE : View.GONE);
+        if (!single) return;
+        // A-B 三态：未设（暗）/ 只设了 A（半亮）/ 循环中（强调色）
+        float alpha = (abA < 0) ? 0.5f : (abB < 0 ? 0.8f : 1f);
+        abButton.setAlpha(alpha);
+        abButton.setBackground(tintCircleBg(abB > abA ? ACCENT : OVER_VIDEO_CHIP));
+        subtitleButton.setAlpha(subOn ? 1f : 0.5f);
+        subtitleButton.setBackground(tintCircleBg(subOn ? ACCENT : OVER_VIDEO_CHIP));
+    }
+
+    private GradientDrawable tintCircleBg(int color) {
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(color);
+        bg.setCornerRadius(50 * dp);
+        return bg;
+    }
+
     // ------------------------------------------------------------ 排布模式
 
     /**
@@ -2116,6 +2837,8 @@ public class MainActivity extends AppCompatActivity {
             layoutButton.setImageResource(prefs.layoutMode() == Prefs.LAYOUT_ROW
                     ? R.drawable.ic_view_list : R.drawable.ic_view_grid);
         }
+        // A-B / 字幕两个键的显隐也随排布变（只有单视频时出现）
+        syncSingleButtons();
     }
 
     // ------------------------------------------------------------ 播放流程
@@ -2157,6 +2880,13 @@ public class MainActivity extends AppCompatActivity {
     private void enterPlayMode(int n) {
         for (Cell c : cells) c.reset();
         zoomed = -1;                      // 新的一轮播放从正常排布开始
+        // 单视频专属状态也清一遍，免得上一轮的 A-B 点/字幕串到这一轮
+        abA = -1;
+        abB = -1;
+        subCues.clear();
+        subTexts.clear();
+        subOn = false;
+        resetWindowBrightness();
 
         assignedCount = n;
         for (int i = 0; i < n; i++) {
@@ -2439,6 +3169,16 @@ public class MainActivity extends AppCompatActivity {
     private void exitPlayMode() {
         playing = false;
         zoomed = -1;
+        abA = -1;
+        abB = -1;
+        subCues.clear();
+        subTexts.clear();
+        subOn = false;
+        if (subLabel != null) subLabel.setVisibility(View.GONE);
+        if (gestureHud != null) gestureHud.setVisibility(View.GONE);
+        // 播放时改的是**本窗口**的亮度，退回选择页要还原，
+        // 否则那个"调暗"会一直留在选择页上
+        resetWindowBrightness();
         savePositions();                 // 必须在 reset() 之前 —— reset 会把 c.mp 置空
         for (Cell c : cells) c.reset();
         applyKeepScreenOn();
@@ -2452,6 +3192,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void assign(Cell c, Item it, int index) {
         c.name = it.name;
+        c.videoId = it.id;
+        c.displayName = it.name;
         c.badge.setText(String.valueOf(index + 1));
         c.nameLabel.setText(labelOf(it));
         c.error.setVisibility(View.GONE);
@@ -2635,8 +3377,12 @@ public class MainActivity extends AppCompatActivity {
             // 选中格的高亮：描边 + 编号底色变强调色。
             // 只在状态真的变了才重建背景 —— 这方法被 ticker 每 400ms 调一次，
             // 无脑 new GradientDrawable 会白白产生垃圾。
-            boolean highlight = playing && i == focused
-                    && (controlsVisible || audioFocusMode);
+            //
+            // 注意这里**只看 controlsVisible**，不再 `|| audioFocusMode`。
+            // 之前带上 audioFocusMode 是想"单路音频时始终标出谁在出声"，
+            // 结果控件自动隐藏后框还留着 —— 看起来就是个没擦干净的残留。
+            // 想看是哪一格出声，点一下唤出控件即可。
+            boolean highlight = playing && i == focused && controlsVisible;
             if (highlight != c.highlighted) {
                 c.highlighted = highlight;
 
@@ -2685,6 +3431,8 @@ public class MainActivity extends AppCompatActivity {
             if (c == null || c.mp == null) continue;
             if (!c.userSeeking) c.sb.setProgress(mpPosition(c));
         }
+        enforceAbLoop();
+        updateSubtitle();
         updateCellChrome();
     }
 
@@ -2755,7 +3503,7 @@ public class MainActivity extends AppCompatActivity {
                                 dur,
                                 date,
                                 bucket,
-                                bname == null || bname.isEmpty() ? "未分类" : bname));
+                                bname == null || bname.isEmpty() ? "未分类" : bname).withSize(size));
                     }
                 }
             } catch (Throwable t) {
@@ -2785,29 +3533,65 @@ public class MainActivity extends AppCompatActivity {
                 sortFolders();
                 sortVideosInFolders();
                 refreshPickUi();
+                if (pickRefresh != null) pickRefresh.setRefreshing(false);
                 if (found.isEmpty()) toast("媒体库里没有视频");
             });
         });
     }
 
-    private void sortFolders() {
-        if (prefs.folderSort() == Prefs.FOLDER_BY_NAME) {
-            Collections.sort(folders, (a, b) -> a.name.compareToIgnoreCase(b.name));
-        } else {
-            Collections.sort(folders, (a, b) -> Integer.compare(b.items.size(), a.items.size()));
+    /**
+     * 下拉刷新：重新查询媒体库。
+     *
+     * loadLibrary 有防重入（libraryLoadStarted），刷新时要先放开这个闸门，
+     * 否则第二次下拉什么都不会发生。
+     */
+    private void reloadLibrary() {
+        if (loading) {
+            if (pickRefresh != null) pickRefresh.setRefreshing(false);
+            return;
         }
+        loading = true;
+        libraryLoadStarted = false;
+        if (openedFolder == null) renderFolders();
+        else renderVideos(openedFolder);
+        loadLibrary();
+    }
+
+    /**
+     * 文件夹排序。顺序开关的含义随排序依据变（和 NextPlayer 一致）：
+     * 名称 → A-Z / Z-A；数量 → 最少优先 / 最多优先。
+     */
+    private void sortFolders() {
+        Comparator<Folder> cmp;
+        if (prefs.folderSort() == Prefs.FOLDER_BY_NAME) {
+            cmp = (a, b) -> a.name.compareToIgnoreCase(b.name);
+        } else {
+            cmp = (a, b) -> Integer.compare(a.items.size(), b.items.size());
+        }
+        if (!prefs.folderSortAsc()) cmp = cmp.reversed();
+        Collections.sort(folders, cmp);
+    }
+
+    /** 一个文件夹里的视频排序。顺序开关的含义同样随依据变。 */
+    private Comparator<Item> itemComparator() {
+        int mode = prefs.videoSort();
+        Comparator<Item> cmp;
+        if (mode == Prefs.VIDEO_BY_NAME) {
+            cmp = (a, b) -> a.name.compareToIgnoreCase(b.name);
+        } else if (mode == Prefs.VIDEO_BY_DURATION) {
+            cmp = (a, b) -> Long.compare(a.durationMs, b.durationMs);
+        } else if (mode == Prefs.VIDEO_BY_SIZE) {
+            cmp = (a, b) -> Long.compare(a.sizeBytes, b.sizeBytes);
+        } else {
+            cmp = (a, b) -> Long.compare(a.dateAdded, b.dateAdded);
+        }
+        return prefs.videoSortAsc() ? cmp : cmp.reversed();
     }
 
     private void sortVideosInFolders() {
-        int mode = prefs.videoSort();
+        Comparator<Item> cmp = itemComparator();
         for (Folder f : folders) {
-            if (mode == Prefs.VIDEO_BY_NAME) {
-                Collections.sort(f.items, (a, b) -> a.name.compareToIgnoreCase(b.name));
-            } else if (mode == Prefs.VIDEO_BY_DURATION) {
-                Collections.sort(f.items, (a, b) -> Long.compare(b.durationMs, a.durationMs));
-            } else {
-                Collections.sort(f.items, (a, b) -> Long.compare(b.dateAdded, a.dateAdded));
-            }
+            Collections.sort(f.items, cmp);
         }
     }
 
@@ -3018,7 +3802,7 @@ public class MainActivity extends AppCompatActivity {
         bg.setCornerRadius(50 * dp);
         iv.setBackground(bg);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(d(38), d(38));
-        lp.setMargins(d(4), 0, d(4), 0);
+        lp.setMargins(d(3), 0, d(3), 0);
         iv.setLayoutParams(lp);
         iv.setOnClickListener(l);
         return iv;

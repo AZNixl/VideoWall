@@ -93,13 +93,27 @@ jobs:
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
 
-      # 推 tag 时顺手发一个 Release，省得每次手动传 APK
+      # 推 tag 时顺手发一个 Release，省得每次手动传 APK。
+      #
+      # 发布物一律用英文名：
+      #   · 资产文件名 VideoWall-<tag>-release.apk（否则是 app-release.apk，
+      #     下了三四个版本之后根本分不清哪个是哪个）
+      #   · release notes 也写英文，仓库对外可见，中文备注对国际用户没意义
       - name: Publish release on tag
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -e
+          APK=app/build/outputs/apk/release/app-release.apk
+          mv "$APK" "app/build/outputs/apk/release/VideoWall-${GITHUB_REF_NAME}-release.apk"
           gh release create "${GITHUB_REF_NAME}" \
-            --title "${GITHUB_REF_NAME}" \
-            --notes "自动构建产物。版本 ${GITHUB_REF_NAME}。" \
+            --title "VideoWall ${GITHUB_REF_NAME}" \
+            --notes "Automated build of VideoWall ${GITHUB_REF_NAME}.
+
+          - Signed with the project release key (see README for the certificate fingerprint).
+          - Android 7.0+ (minSdk 24). No native libraries, so it runs on armeabi-v7a, arm64-v8a and x86 alike.
+          - Installable over any earlier build signed with the same key.
+
+          See CHANGELOG.md for the full version history." \
             app/build/outputs/apk/release/*.apk

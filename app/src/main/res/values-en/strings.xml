@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  English display name.
+  放在 values-en 而不是 values：中文环境下仍然是「视频墙」，
+  英文环境下启动器显示 VideoWall —— 这样 GitHub 上发出去的包
+  在国际用户那边也有个能读的名字。
+-->
+<resources>
+    <string name="app_name">VideoWall</string>
+</resources>

@@ -14,8 +14,8 @@ android {
         applicationId = "com.aznixl.videowall"
         minSdk = 24
         targetSdk = 36
-        versionCode = 21
-        versionName = "3.0"
+        versionCode = 22
+        versionName = "3.1"
     }
 
     // 发布签名。
@@ -78,4 +78,7 @@ dependencies {
     // 这是本项目唯一的第三方依赖 —— 此前版本是零依赖，为了拿到
     // Material 的组件样式、涟漪反馈与 DayNight 主题才引入。
     implementation("com.google.android.material:material:1.14.0")
+
+    // 首页下拉刷新。Material 里没有等价组件，只能单独引一个。
+    implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
 }
