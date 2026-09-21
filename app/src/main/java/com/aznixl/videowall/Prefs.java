@@ -263,6 +263,15 @@ public final class Prefs {
         sp.edit().putInt("folderSort", v).apply();
     }
 
+    /** 首页文件夹用两列网格还是单列列表。 */
+    public boolean folderGrid() {
+        return sp.getBoolean("folderGrid", false);
+    }
+
+    public void setFolderGrid(boolean v) {
+        sp.edit().putBoolean("folderGrid", v).apply();
+    }
+
     public int videoSort() {
         return sp.getInt("videoSort", VIDEO_BY_DATE);
     }

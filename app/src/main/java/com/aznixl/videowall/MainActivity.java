@@ -32,6 +32,7 @@ import android.util.Log;
 import android.util.Size;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
@@ -48,6 +49,7 @@ import android.widget.Toast;
 import android.widget.VideoView;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.app.AppCompatDelegate;
 
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
@@ -168,7 +170,10 @@ public class MainActivity extends AppCompatActivity {
     private TextView breadcrumb;
     private LinearLayout slotsBar;
     private TextView startButton;
-    private TextView pickCountText;
+    /** 顶栏的主题切换键（显示当前档位）。 */
+    private TextView themeButton;
+    /** 顶栏的文件夹排布切换键（图标）。 */
+    private ImageView layoutToggleButton;
 
     // ---- 播放页
     private FrameLayout playView;
@@ -398,6 +403,7 @@ public class MainActivity extends AppCompatActivity {
             updateCellChrome();
         }
         syncQuickButtons();
+        syncTopButtons();
         if (loading) return;
         sortFolders();
         sortVideosInFolders();
@@ -630,12 +636,11 @@ public class MainActivity extends AppCompatActivity {
     /**
      * 把格内控件从屏幕边缘让开。
      *
-     * 两个方向都要让：
-     *   · **上下**：最下排的控件按底部手势区高度往上抬（有些设备的手势区在底部）。
-     *   · **左右**：首列/末列的控件按左右手势区宽度往里缩。
-     *     实测 OnePlus PJZ110 竖屏下手势区就是左右各 120px 的整条边 ——
-     *     进度条横跨整格宽度，最外两列的进度条末端正好压在返回手势上，
-     *     拖到边上就把系统手势触发了。这才是"跟系统手势冲突"的主因。
+     * **控件区本身只做垂直让位，不做左右内缩** —— 一内缩它就比视频窄，
+     * 看着像整体错位（这正是上一版被说"不对劲"的原因）。
+     * 左右只收**进度条**：它横跨整格宽度，最外两列的轨道末端正压在左右两条
+     * 返回手势带上（实测该机 systemGestures 是左右各 120px 的整条边），
+     * 拖到边上会把系统手势触发出来。按钮是点击不是拖动，不需要躲。
      */
     private void applyCellChromeInsets() {
         if (cells[0] == null) return;
@@ -652,19 +657,24 @@ public class MainActivity extends AppCompatActivity {
             boolean bottomRow = (i / cols) == (rows - 1);
 
             int wantBottom = bottomRow ? lift : d(6);
-            int wantLeft = leftEdge ? insetGestureLeft + d(8) : d(6);
-            int wantRight = rightEdge ? insetGestureRight + d(8) : d(6);
-
             if (c.bottomOverlay.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp =
                         (FrameLayout.LayoutParams) c.bottomOverlay.getLayoutParams();
-                if (lp.bottomMargin != wantBottom
-                        || lp.leftMargin != wantLeft
-                        || lp.rightMargin != wantRight) {
+                if (lp.bottomMargin != wantBottom) {
                     lp.bottomMargin = wantBottom;
-                    lp.leftMargin = wantLeft;
-                    lp.rightMargin = wantRight;
                     c.bottomOverlay.setLayoutParams(lp);
+                }
+            }
+
+            if (c.sb.getLayoutParams() instanceof ViewGroup.MarginLayoutParams) {
+                ViewGroup.MarginLayoutParams sp =
+                        (ViewGroup.MarginLayoutParams) c.sb.getLayoutParams();
+                int sl = d(4) + (leftEdge ? insetGestureLeft : 0);
+                int sr = d(4) + (rightEdge ? insetGestureRight : 0);
+                if (sp.leftMargin != sl || sp.rightMargin != sr) {
+                    sp.leftMargin = sl;
+                    sp.rightMargin = sr;
+                    c.sb.setLayoutParams(sp);
                 }
             }
         }
@@ -949,6 +959,62 @@ public class MainActivity extends AppCompatActivity {
         loadLibrary();
     }
 
+    // ------------------------------------------------------------ 选择页顶栏
+
+    /**
+     * 主题切换：亮色 → 暗色 → 跟随系统 → 亮色。
+     *
+     * 三档都保留（和设置页一致），只是把最常用的搬到手边。
+     * 改完必须自己重建 Activity —— manifest 里为了不打断播放声明了 uiMode，
+     * 系统不会自动重建。
+     */
+    private void toggleTheme() {
+        int next;
+        switch (prefs.themeMode()) {
+            case Prefs.THEME_LIGHT:
+                next = Prefs.THEME_DARK;
+                break;
+            case Prefs.THEME_DARK:
+                next = Prefs.THEME_SYSTEM;
+                break;
+            default:
+                next = Prefs.THEME_LIGHT;
+                break;
+        }
+        prefs.setThemeMode(next);
+        AppCompatDelegate.setDefaultNightMode(App.nightModeOf(next));
+        // 延到下一轮再重建：在点击回调里直接 recreate 会踩到"视图正在派发事件"的状态
+        ui.post(this::recreate);
+    }
+
+    /** 文件夹排布：单列列表 ⇄ 两列网格。 */
+    private void toggleFolderGrid() {
+        prefs.setFolderGrid(!prefs.folderGrid());
+        syncTopButtons();
+        refreshPickUi();
+    }
+
+    /** 刷新选择页顶栏两个切换键的显示（图标/文字都表示"当前是什么"）。 */
+    private void syncTopButtons() {
+        if (themeButton != null) {
+            switch (prefs.themeMode()) {
+                case Prefs.THEME_LIGHT:
+                    themeButton.setText("亮色");
+                    break;
+                case Prefs.THEME_DARK:
+                    themeButton.setText("暗色");
+                    break;
+                default:
+                    themeButton.setText("跟随");
+                    break;
+            }
+        }
+        if (layoutToggleButton != null) {
+            layoutToggleButton.setImageResource(prefs.folderGrid()
+                    ? R.drawable.ic_view_grid : R.drawable.ic_view_list);
+        }
+    }
+
     // ------------------------------------------------------------ 选择页 UI
 
     private LinearLayout buildPickView() {
@@ -968,10 +1034,16 @@ public class MainActivity extends AppCompatActivity {
         title.getPaint().setFakeBoldText(true);
         top.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
 
-        pickCountText = new TextView(this);
-        pickCountText.setTextColor(MUTED);
-        pickCountText.setTextSize(12);
-        top.addView(pickCountText);
+        // 顶栏三个操作键：主题切换、文件夹排布切换、设置。
+        // 原来这里还有个「已选 n/4」文本，去掉给按钮腾位置 ——
+        // 选了几个看底部槽位和「开始播放 · N 路」就知道了，重复。
+        themeButton = pill("亮色", null);
+        themeButton.setOnClickListener(v -> toggleTheme());
+        top.addView(themeButton);
+
+        layoutToggleButton = pillIcon(R.drawable.ic_view_list, v -> toggleFolderGrid());
+        top.addView(layoutToggleButton);
+
         top.addView(pill("设置", v -> startActivity(new Intent(this, SettingsActivity.class))));
         col.addView(top);
 
@@ -1046,7 +1118,6 @@ public class MainActivity extends AppCompatActivity {
         }
 
         int n = picked.size();
-        pickCountText.setText("已选 " + n + "/" + MAX_CELLS);
 
         GradientDrawable sb = new GradientDrawable();
         sb.setColor(n > 0 ? ACCENT : CHIP);
@@ -1096,11 +1167,16 @@ public class MainActivity extends AppCompatActivity {
         // 底部有明确的一行提示 + 可点进设置，所以不是静默隐藏。
         LinkedHashMap<Long, String> hidden = Prefs.parseFolders(prefs.excludedFolders());
 
+        // 先收集要显示的文件夹（「全部视频」+ 未被排除的），再决定用列表还是网格渲染
+        List<Folder> show = new ArrayList<>();
+        List<Integer> counts = new ArrayList<>();
+
         Folder all = new Folder(-1, "全部视频");
         for (Item it : allItems) {
             if (!hidden.containsKey(it.bucketId)) all.items.add(it);
         }
-        listContainer.addView(folderRow(all, all.items.size()));
+        show.add(all);
+        counts.add(all.items.size());
 
         int hiddenCount = 0;
         for (Folder f : folders) {
@@ -1108,12 +1184,85 @@ public class MainActivity extends AppCompatActivity {
                 hiddenCount++;
                 continue;
             }
-            listContainer.addView(folderRow(f, f.items.size()));
+            show.add(f);
+            counts.add(f.items.size());
+        }
+
+        if (prefs.folderGrid()) {
+            // 两列网格：每两个文件夹并成一行，用 weight 平分宽度。
+            // 不用 GridLayout —— 这里不需要跨行跨列，配 weight 的 LinearLayout 更省事也不会踩校验。
+            for (int i = 0; i < show.size(); i += 2) {
+                LinearLayout row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
+                rlp.setMargins(0, d(4), 0, d(4));
+                row.setLayoutParams(rlp);
+                for (int k = 0; k < 2; k++) {
+                    LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(0, -2, 1f);
+                    clp.setMargins(k == 0 ? 0 : d(4), 0, k == 0 ? d(4) : 0, 0);
+                    if (i + k < show.size()) {
+                        row.addView(folderCard(show.get(i + k), counts.get(i + k)), clp);
+                    } else {
+                        // 奇数个时补一个等宽占位，否则最后一张卡会被拉满整行
+                        row.addView(new View(this), clp);
+                    }
+                }
+                listContainer.addView(row);
+            }
+        } else {
+            for (int i = 0; i < show.size(); i++) {
+                listContainer.addView(folderRow(show.get(i), counts.get(i)));
+            }
         }
 
         if (hiddenCount > 0) {
             listContainer.addView(hiddenFooter(hiddenCount));
         }
+    }
+
+    private void openFolder(Folder f) {
+        openedFolder = f;
+        breadcrumb.setText("‹  " + f.name);
+        breadcrumb.setVisibility(View.VISIBLE);
+        renderVideos(f);
+    }
+
+    /** 两列网格里的文件夹卡：图标 + 名称 + 数量，竖排。 */
+    private View folderCard(Folder f, int count) {
+        LinearLayout v = new LinearLayout(this);
+        v.setOrientation(LinearLayout.VERTICAL);
+        v.setPadding(d(12), d(12), d(12), d(12));
+        card(v);
+
+        TextView icon = new TextView(this);
+        icon.setText("▤");
+        icon.setTextSize(16);
+        icon.setTextColor(ACCENT);
+        icon.setGravity(Gravity.CENTER);
+        GradientDrawable ibg = new GradientDrawable();
+        ibg.setColor(CHIP_ON);
+        ibg.setCornerRadius(9 * dp);
+        icon.setBackground(ibg);
+        v.addView(icon, new LinearLayout.LayoutParams(d(34), d(34)));
+
+        TextView n = new TextView(this);
+        n.setText(f.name);
+        n.setTextColor(TEXT_PRIMARY);
+        n.setTextSize(13);
+        n.setMaxLines(2);
+        n.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(-1, -2);
+        nlp.setMargins(0, d(9), 0, 0);
+        v.addView(n, nlp);
+
+        TextView c = new TextView(this);
+        c.setText(count + " 个视频");
+        c.setTextColor(MUTED);
+        c.setTextSize(11);
+        v.addView(c, new LinearLayout.LayoutParams(-1, -2));
+
+        v.setOnClickListener(x -> openFolder(f));
+        return v;
     }
 
     /** 首页底部那行"已隐藏 N 个文件夹"，点一下去设置里调整。 */
@@ -1172,12 +1321,7 @@ public class MainActivity extends AppCompatActivity {
         arrow.setTextSize(18);
         r.addView(arrow);
 
-        r.setOnClickListener(v -> {
-            openedFolder = f;
-            breadcrumb.setText("‹  " + f.name);
-            breadcrumb.setVisibility(View.VISIBLE);
-            renderVideos(f);
-        });
+        r.setOnClickListener(v -> openFolder(f));
         return r;
     }
 
@@ -1414,26 +1558,25 @@ public class MainActivity extends AppCompatActivity {
         // 现在每格的控件全部集中在格内底部，格子顶部保持干净：
         // 顶栏只会盖到上排的**画面**，不会盖到任何控件；
         // 而上排格子的控件在屏幕竖直中线附近，离顶栏很远。
+        // 编号与文件名**不再画成胶囊**。
+        //
+        // 之前它们各是一个深色圆角块，和真正的操作键长得一模一样 ——
+        // 一整排看下来像是 6 个按钮，其中两个点了没反应，很乱。
+        // 现在只留文字 + 阴影：压在视频上也看得清，而视觉上"像按钮"的只有下面那排操作键。
         c.badge = new TextView(this);
         c.badge.setText(String.valueOf(index + 1));
-        c.badge.setTextColor(Color.WHITE);
-        c.badge.setTextSize(10);
-        c.badge.setPadding(d(6), d(1), d(6), d(1));
-        GradientDrawable bb = new GradientDrawable();
-        bb.setColor(OVER_VIDEO_LABEL);
-        bb.setCornerRadius(20 * dp);
-        c.badge.setBackground(bb);
+        c.badge.setTextColor(ACCENT);
+        c.badge.setTextSize(11);
+        c.badge.getPaint().setFakeBoldText(true);
+        c.badge.setPadding(d(3), 0, d(7), 0);
+        c.badge.setShadowLayer(5f, 0f, 1f, 0xFF000000);
 
         c.nameLabel = new TextView(this);
-        c.nameLabel.setTextColor(0xCCFFFFFF);
-        c.nameLabel.setTextSize(10);
+        c.nameLabel.setTextColor(0xE6FFFFFF);
+        c.nameLabel.setTextSize(11);
         c.nameLabel.setSingleLine(true);
-        c.nameLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        c.nameLabel.setPadding(d(7), d(2), d(7), d(2));
-        GradientDrawable nb = new GradientDrawable();
-        nb.setColor(OVER_VIDEO_LABEL);
-        nb.setCornerRadius(20 * dp);
-        c.nameLabel.setBackground(nb);
+        c.nameLabel.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        c.nameLabel.setShadowLayer(5f, 0f, 1f, 0xFF000000);
 
         LinearLayout metaRow = new LinearLayout(this);
         metaRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -1470,7 +1613,7 @@ public class MainActivity extends AppCompatActivity {
         bottomOverlay.addView(c.ctrlStrip);
 
         c.sb = new SeekBar(this);
-        FrameLayout.LayoutParams sLp = new FrameLayout.LayoutParams(-1, -2);
+        LinearLayout.LayoutParams sLp = new LinearLayout.LayoutParams(-1, -2);
         sLp.setMargins(d(4), 0, d(4), 0);
         c.sb.setLayoutParams(sLp);
         c.sb.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -2322,10 +2465,8 @@ public class MainActivity extends AppCompatActivity {
                 bg.setStroke(d(highlight ? 2 : 0), ACCENT);
                 c.root.setBackground(bg);
 
-                GradientDrawable badgeBg = new GradientDrawable();
-                badgeBg.setColor(highlight ? ACCENT : OVER_VIDEO_LABEL);
-                badgeBg.setCornerRadius(20 * dp);
-                c.badge.setBackground(badgeBg);
+                // 编号没底色了，选中改成变白（配上面那道强调描边，一眼看出是这一格）
+                c.badge.setTextColor(highlight ? Color.WHITE : ACCENT);
             }
         }
     }
@@ -2665,6 +2806,23 @@ public class MainActivity extends AppCompatActivity {
         b.setLayoutParams(lp);
         b.setOnClickListener(l);
         return b;
+    }
+
+    /** 选择页顶栏的图标键：和 [pill] 同一套配色与尺寸，只是内容换成矢量图标。 */
+    private ImageView pillIcon(int drawableRes, View.OnClickListener l) {
+        ImageView iv = new ImageView(this);
+        iv.setImageResource(drawableRes);
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        iv.setPadding(d(8), d(8), d(8), d(8));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(CHIP);
+        bg.setCornerRadius(50 * dp);
+        iv.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(d(34), d(34));
+        lp.setMargins(d(6), 0, 0, 0);
+        iv.setLayoutParams(lp);
+        iv.setOnClickListener(l);
+        return iv;
     }
 
     /** 播放页顶栏用的紧凑药丸键。padding/margin 压得比 pick 页小 —— 5 个键要挤进 360dp。 */
