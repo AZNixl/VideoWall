@@ -1,0 +1,15 @@
+# 统一换行：仓库内一律 LF。
+# 否则在 Windows 上提交会把 gradlew / *.yml 变 CRLF，
+# CI（Linux）执行 ./gradlew 时会报 "bad interpreter"。
+* text=auto eol=lf
+
+# Windows 批处理必须保持 CRLF
+*.bat text eol=crlf
+
+# 二进制，别动
+*.png binary
+*.jpg binary
+*.webp binary
+*.jks binary
+*.keystore binary
+*.apk binary

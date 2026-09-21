@@ -1,0 +1,649 @@
+﻿import android.app.AlertDialog;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.graphics.*;
+import android.graphics.drawable.GradientDrawable;
+import android.media.MediaMetadataRetriever;
+import android.media.ThumbnailUtils;
+import android.provider.MediaStore;
+import android.util.DisplayMetrics;
+import android.view.*;
+import android.widget.*;
+import android.os.Handler;
+import android.os.Looper;
+import java.io.File;
+import java.util.ArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+final ExecutorService threadPool = Executors.newFixedThreadPool(4);
+final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+mainHandler.post(new Runnable() {
+    public void run() {
+        
+        final WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        final DisplayMetrics metrics = context.getResources().getDisplayMetrics();
+        final int screenW = metrics.widthPixels;
+        final int screenH = metrics.heightPixels;
+        final float dp = metrics.density;
+
+        // ==========================================
+        // 配置与全局状态
+        // ==========================================
+        final String[] configPaths = new String[]{tasker.getVariable("ViewerPaths")};
+        if (configPaths[0] == null || configPaths[0].trim().equals("")) configPaths[0] = "/storage/emulated/0/DCIM/Camera\n/storage/emulated/0/DCIM/ScreenRecorder";
+        final String[] configSuffixes = new String[]{tasker.getVariable("ViewerSuffixes")};
+        if (configSuffixes[0] == null || configSuffixes[0].trim().equals("")) configSuffixes[0] = ".mp4,.jpg,.png";
+
+        final int[] state = new int[]{0}; 
+        final String[] currentMedia = new String[]{""};
+        final int[] currentIndex = new int[]{0}; 
+        final ArrayList mediaList = new ArrayList(); 
+        final ArrayList activeVideos = new ArrayList(); 
+
+        final int FLAG_NOT_FOCUSABLE = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
+        final int FLAG_WATCH_OUTSIDE = WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH;
+        
+        final WindowManager.LayoutParams params = new WindowManager.LayoutParams(-2, -2, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, FLAG_NOT_FOCUSABLE | FLAG_WATCH_OUTSIDE, PixelFormat.TRANSLUCENT);
+        params.gravity = Gravity.TOP | Gravity.LEFT;
+        
+        // 【核心延伸】：强制覆盖刘海/挖孔区域 (横屏无死角)
+        try { params.getClass().getField("layoutInDisplayCutoutMode").setInt(params, 1); } catch (Exception e) {}
+        
+        final FrameLayout rootContainer = new FrameLayout(context);
+
+        // --- 悬浮球 ---
+        final TextView ballView = new TextView(context);
+        ballView.setText("📁"); ballView.setTextColor(Color.WHITE); ballView.setTextSize(24); ballView.setGravity(Gravity.CENTER);
+        GradientDrawable ballBg = new GradientDrawable(); ballBg.setColor(Color.parseColor("#5768ef")); ballBg.setShape(GradientDrawable.OVAL);
+        ballView.setBackground(ballBg); ballView.setLayoutParams(new FrameLayout.LayoutParams((int)(50*dp), (int)(50*dp)));
+        ballView.setVisibility(View.GONE); 
+
+        // --- 主面板 ---
+        final FrameLayout panelView = new FrameLayout(context);
+        final int panelWidth = (int)(screenW * 0.85f); final int panelHeight = (int)(screenH * 0.65f);
+        panelView.setLayoutParams(new FrameLayout.LayoutParams(panelWidth, panelHeight));
+        GradientDrawable panelBg = new GradientDrawable(); panelBg.setColor(Color.parseColor("#060606"));
+        panelBg.setCornerRadius(16 * dp); panelBg.setStroke((int)(2*dp), Color.parseColor("#333333"));
+        panelView.setBackground(panelBg); panelView.setClipToOutline(true);
+
+        final int[] ballPos = new int[]{screenW, screenH / 4}; 
+        final int[] panelPos = new int[]{(screenW - panelWidth) / 2, (screenH - panelHeight) / 2};
+
+        // ==========================================
+        // 核心视图层级构建
+        // ==========================================
+        
+        // [1] 路径列表页 
+        final LinearLayout pathViewContainer = new LinearLayout(context);
+        pathViewContainer.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout header = new LinearLayout(context); header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setPadding((int)(16*dp), (int)(16*dp), (int)(16*dp), (int)(16*dp)); header.setGravity(Gravity.CENTER_VERTICAL);
+
+        TextView title = new TextView(context); title.setText("媒体库"); title.setTextColor(Color.WHITE);
+        title.setTextSize(20); title.getPaint().setFakeBoldText(true); title.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1.0f));
+
+        Button settingsBtn = new Button(context); settingsBtn.setText("⚙️"); settingsBtn.setTextColor(Color.WHITE);
+        GradientDrawable setBg = new GradientDrawable(); setBg.setColor(Color.parseColor("#1f1f1f")); setBg.setCornerRadius(50 * dp);
+        settingsBtn.setBackground(setBg); settingsBtn.setLayoutParams(new LinearLayout.LayoutParams((int)(50*dp), (int)(40*dp)));
+
+        header.addView(title); header.addView(settingsBtn); pathViewContainer.addView(header);
+
+        final float[] pTouch = new float[]{0, 0, 0, 0}; 
+        header.setOnTouchListener(new View.OnTouchListener() {
+            public boolean onTouch(View v, MotionEvent event) {
+                if (state[0] != 0) return false; 
+                switch (event.getAction()) {
+                    case MotionEvent.ACTION_DOWN: pTouch[0] = event.getRawX(); pTouch[1] = event.getRawY(); pTouch[2] = params.x; pTouch[3] = params.y; return true;
+                    case MotionEvent.ACTION_MOVE: params.x = (int)(pTouch[2] + (event.getRawX() - pTouch[0])); params.y = (int)(pTouch[3] + (event.getRawY() - pTouch[1])); wm.updateViewLayout(rootContainer, params); return true;
+                    case MotionEvent.ACTION_UP: panelPos[0] = params.x; panelPos[1] = params.y; return true;
+                }
+                return false;
+            }
+        });
+
+        final ScrollView pathScroll = new ScrollView(context);
+        final LinearLayout pathListContainer = new LinearLayout(context); pathListContainer.setOrientation(LinearLayout.VERTICAL);
+        pathListContainer.setPadding((int)(16*dp), 0, (int)(16*dp), (int)(16*dp)); pathScroll.addView(pathListContainer); pathViewContainer.addView(pathScroll);
+        
+        // [1.5] 设置页面
+        final LinearLayout settingsContainer = new LinearLayout(context); settingsContainer.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable settingsPanelBg = new GradientDrawable(); settingsPanelBg.setColor(Color.parseColor("#111111"));
+        settingsPanelBg.setCornerRadius(24 * dp); settingsPanelBg.setStroke((int)(1*dp), Color.parseColor("#333333"));
+        settingsContainer.setBackground(settingsPanelBg); settingsContainer.setPadding((int)(20*dp), (int)(20*dp), (int)(20*dp), (int)(20*dp));
+        LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(-1, -2); scLp.setMargins((int)(16*dp), (int)(16*dp), (int)(16*dp), (int)(16*dp));
+        settingsContainer.setLayoutParams(scLp); settingsContainer.setVisibility(View.GONE);
+
+        TextView sTitle = new TextView(context); sTitle.setText("设置"); sTitle.setTextColor(Color.WHITE); sTitle.setTextSize(20);
+        TextView s1 = new TextView(context); s1.setText("\n扫描目录 (每行一个):"); s1.setTextColor(Color.GRAY);
+        final EditText pathEdit = new EditText(context); pathEdit.setTextColor(Color.WHITE); pathEdit.setText(configPaths[0]); pathEdit.setMinLines(3); pathEdit.setGravity(Gravity.TOP);
+        TextView s2 = new TextView(context); s2.setText("\n后缀过滤 (逗号分隔):"); s2.setTextColor(Color.GRAY);
+        final EditText suffixEdit = new EditText(context); suffixEdit.setTextColor(Color.WHITE); suffixEdit.setText(configSuffixes[0]);
+        
+        LinearLayout sBtns = new LinearLayout(context); sBtns.setOrientation(LinearLayout.HORIZONTAL); sBtns.setPadding(0, (int)(16*dp), 0, 0);
+        Button saveBtn = new Button(context); saveBtn.setText("保存"); saveBtn.setTextColor(Color.WHITE);
+        GradientDrawable saveBg = new GradientDrawable(); saveBg.setColor(Color.parseColor("#5768ef")); saveBg.setCornerRadius(50*dp);
+        saveBtn.setBackground(saveBg); LinearLayout.LayoutParams sBtnLp = new LinearLayout.LayoutParams(0, (int)(45*dp), 1.0f); sBtnLp.setMargins(0, 0, (int)(8*dp), 0); saveBtn.setLayoutParams(sBtnLp);
+        Button cancelBtn = new Button(context); cancelBtn.setText("取消"); cancelBtn.setTextColor(Color.WHITE);
+        GradientDrawable cancelBg = new GradientDrawable(); cancelBg.setColor(Color.parseColor("#333333")); cancelBg.setCornerRadius(50*dp);
+        cancelBtn.setBackground(cancelBg); cancelBtn.setLayoutParams(new LinearLayout.LayoutParams(0, (int)(45*dp), 1.0f));
+        sBtns.addView(saveBtn); sBtns.addView(cancelBtn);
+        settingsContainer.addView(sTitle); settingsContainer.addView(s1); settingsContainer.addView(pathEdit); settingsContainer.addView(s2); settingsContainer.addView(suffixEdit); settingsContainer.addView(sBtns);
+
+        // [2] 信息流页 
+        final FrameLayout feedLayer = new FrameLayout(context);
+        final ScrollView feedScroll = new ScrollView(context);
+        final LinearLayout mediaListContainer = new LinearLayout(context);
+        mediaListContainer.setOrientation(LinearLayout.VERTICAL);
+        mediaListContainer.setPadding((int)(16*dp), (int)(16*dp), (int)(16*dp), (int)(90*dp)); 
+        feedScroll.addView(mediaListContainer); feedLayer.addView(feedScroll);
+
+        Button feedCloseBtn = new Button(context);
+        feedCloseBtn.setText("✖"); feedCloseBtn.setTextColor(Color.WHITE); feedCloseBtn.setTextSize(18);
+        GradientDrawable fcBg = new GradientDrawable(); fcBg.setColor(Color.parseColor("#EE111111")); fcBg.setShape(GradientDrawable.OVAL);
+        fcBg.setStroke((int)(2*dp), Color.parseColor("#5768ef")); feedCloseBtn.setBackground(fcBg);
+        FrameLayout.LayoutParams fcbLp = new FrameLayout.LayoutParams((int)(55*dp), (int)(55*dp));
+        fcbLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL; fcbLp.setMargins(0, 0, 0, (int)(20*dp));
+        feedCloseBtn.setLayoutParams(fcbLp); feedLayer.addView(feedCloseBtn); feedLayer.setVisibility(View.GONE);
+
+        // [3] 全屏专用沉浸式播放器 (无死角)
+        final FrameLayout fullScreenContainer = new FrameLayout(context);
+        fullScreenContainer.setBackgroundColor(Color.BLACK); fullScreenContainer.setVisibility(View.GONE);
+        final ImageView fullScreenImageView = new ImageView(context); fullScreenImageView.setLayoutParams(new FrameLayout.LayoutParams(-1, -1)); fullScreenImageView.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        
+        final LinearLayout controlLayer = new LinearLayout(context); controlLayer.setOrientation(LinearLayout.HORIZONTAL); controlLayer.setGravity(Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL); controlLayer.setPadding((int)(16*dp), (int)(16*dp), (int)(16*dp), (int)(48*dp));
+        FrameLayout.LayoutParams controlLp = new FrameLayout.LayoutParams(-1, -2); controlLp.gravity = Gravity.BOTTOM; controlLayer.setLayoutParams(controlLp); controlLayer.setBackgroundColor(Color.parseColor("#88000000"));
+
+        final SeekBar fsProgressBar = new SeekBar(context); fsProgressBar.setLayoutParams(new LinearLayout.LayoutParams(0, -2, 1.0f));
+        LinearLayout.LayoutParams cBtnLp = new LinearLayout.LayoutParams(-2, (int)(36*dp)); cBtnLp.setMargins((int)(8*dp), 0, 0, 0);
+
+        Button renameBtn = new Button(context); renameBtn.setText("重命名"); renameBtn.setTextColor(Color.WHITE);
+        GradientDrawable rBg = new GradientDrawable(); rBg.setColor(Color.parseColor("#444444")); rBg.setCornerRadius(50*dp); renameBtn.setBackground(rBg); renameBtn.setLayoutParams(cBtnLp);
+        Button deleteBtn = new Button(context); deleteBtn.setText("删除"); deleteBtn.setTextColor(Color.WHITE);
+        GradientDrawable dBg = new GradientDrawable(); dBg.setColor(Color.parseColor("#aa0000")); dBg.setCornerRadius(50*dp); deleteBtn.setBackground(dBg); deleteBtn.setLayoutParams(cBtnLp);
+        
+        controlLayer.addView(fsProgressBar); controlLayer.addView(renameBtn); controlLayer.addView(deleteBtn);
+        
+        final VideoView fsVideoView = new VideoView(context);
+
+        fullScreenContainer.addView(fullScreenImageView); fullScreenContainer.addView(controlLayer);
+
+        panelView.addView(pathViewContainer); panelView.addView(settingsContainer); panelView.addView(feedLayer); panelView.addView(fullScreenContainer);
+
+        // ==========================================
+        // 沉浸式调度器与退场过渡
+        // ==========================================
+        final View edgeSwipeZone = new View(context);
+        FrameLayout.LayoutParams edgeLp = new FrameLayout.LayoutParams((int)(25*dp), -1); edgeLp.gravity = Gravity.LEFT; edgeSwipeZone.setLayoutParams(edgeLp);
+        
+        final Runnable goBack = new Runnable() {
+            public void run() {
+                if (state[0] == 2) {
+                    state[0] = 1;
+                    params.screenOrientation = -1; 
+                    params.flags &= ~WindowManager.LayoutParams.FLAG_FULLSCREEN;
+                    params.flags &= ~WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+                    fullScreenContainer.setSystemUiVisibility(0); // 恢复系统UI
+                    wm.updateViewLayout(rootContainer, params);
+                    
+                    // 【全屏到信息流：呼吸缩小动画】
+                    fullScreenContainer.animate().alpha(0f).scaleX(0.95f).scaleY(0.95f).setDuration(250).withEndAction(new Runnable(){
+                        public void run() { fullScreenContainer.setVisibility(View.GONE); }
+                    }).start();
+                    
+                    feedLayer.setAlpha(0f); feedLayer.setScaleX(0.95f); feedLayer.setScaleY(0.95f); feedLayer.setVisibility(View.VISIBLE);
+                    feedLayer.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(250).start();
+                    
+                    if (fsVideoView.isPlaying()) fsVideoView.stopPlayback();
+                    if (fsVideoView.getParent() != null) ((ViewGroup)fsVideoView.getParent()).removeView(fsVideoView);
+                } else if (state[0] == 1) {
+                    state[0] = 0;
+                    for(int i=0; i<activeVideos.size(); i++) {
+                        Object[] data = (Object[]) activeVideos.get(i);
+                        VideoView ov = (VideoView) data[0];
+                        ov.stopPlayback(); if(ov.getParent() != null) ((ViewGroup)ov.getParent()).removeView(ov);
+                    }
+                    activeVideos.clear();
+                    
+                    // 【信息流到路径：呼吸缩小动画】
+                    feedLayer.animate().alpha(0f).scaleX(0.9f).scaleY(0.9f).setDuration(250).withEndAction(new Runnable(){
+                        public void run() { feedLayer.setVisibility(View.GONE); mediaListContainer.removeAllViews(); }
+                    }).start();
+                    
+                    pathViewContainer.setAlpha(0f); pathViewContainer.setScaleX(0.9f); pathViewContainer.setScaleY(0.9f); pathViewContainer.setVisibility(View.VISIBLE);
+                    pathViewContainer.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(250).start();
+                    
+                    params.width = -2; params.height = -2; params.x = panelPos[0]; params.y = panelPos[1];
+                    panelView.setLayoutParams(new FrameLayout.LayoutParams(panelWidth, panelHeight));
+                    wm.updateViewLayout(rootContainer, params);
+                }
+            }
+        };
+
+        feedCloseBtn.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { goBack.run(); } });
+
+        edgeSwipeZone.setOnTouchListener(new View.OnTouchListener() {
+            float startX = 0; boolean triggered = false;
+            public boolean onTouch(View v, MotionEvent event) {
+                if(event.getAction() == MotionEvent.ACTION_DOWN) { startX = event.getX(); triggered = false; return true; }
+                if(event.getAction() == MotionEvent.ACTION_MOVE && !triggered) { if(event.getX() - startX > 10*dp) { triggered = true; goBack.run(); } }
+                return true;
+            }
+        });
+        panelView.addView(edgeSwipeZone); 
+
+        // ==========================================
+        // 全屏渲染引擎 (包含强制全屏覆盖与自动旋转)
+        // ==========================================
+        final Runnable renderFullScreen = new Runnable() {
+            public void run() {
+                while(currentIndex[0] >= 0 && currentIndex[0] < mediaList.size() && mediaList.get(currentIndex[0]).equals("")) currentIndex[0]++;
+                if (currentIndex[0] >= mediaList.size() || currentIndex[0] < 0) return;
+
+                final String path = (String) mediaList.get(currentIndex[0]);
+                currentMedia[0] = path; String lower = path.toLowerCase();
+                
+                for(int i=0; i<activeVideos.size(); i++) {
+                    Object[] data = (Object[]) activeVideos.get(i);
+                    VideoView ov = (VideoView) data[0];
+                    if(ov.isPlaying()) { ov.pause(); ((TextView)data[3]).setVisibility(View.VISIBLE); }
+                }
+                
+                final boolean alreadyFullscreen = (state[0] == 2);
+                state[0] = 2;
+                
+                if (!alreadyFullscreen) {
+                    // 【信息流到全屏：呼吸放大动画】
+                    fullScreenContainer.setAlpha(0f); fullScreenContainer.setScaleX(0.95f); fullScreenContainer.setScaleY(0.95f); fullScreenContainer.setVisibility(View.VISIBLE);
+                    fullScreenContainer.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(250).start(); 
+                    
+                    feedLayer.animate().alpha(0f).scaleX(0.95f).scaleY(0.95f).setDuration(250).withEndAction(new Runnable(){
+                        public void run() { feedLayer.setVisibility(View.GONE); }
+                    }).start();
+                    
+                    controlLayer.setVisibility(View.VISIBLE);
+                    params.width = -1; params.height = -1; params.x = 0; params.y = 0;
+                    panelView.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
+                }
+
+                // 【终极沉浸模式参数】：隐藏状态栏、底部栏，无视边界
+                params.flags |= WindowManager.LayoutParams.FLAG_FULLSCREEN;
+                params.flags |= WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS;
+                params.screenOrientation = -1; 
+                fullScreenContainer.setSystemUiVisibility(View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+
+                if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv")) {
+                    try {
+                        MediaMetadataRetriever ret = new MediaMetadataRetriever(); ret.setDataSource(path);
+                        String wStr = ret.extractMetadata(18); String hStr = ret.extractMetadata(19); String rStr = ret.extractMetadata(24);
+                        int w = wStr != null ? Integer.parseInt(wStr) : 0; int h = hStr != null ? Integer.parseInt(hStr) : 0; int r = rStr != null ? Integer.parseInt(rStr) : 0;
+                        if (r == 90 || r == 270) { int t = w; w = h; h = t; }
+                        if (w > h) params.screenOrientation = 6; // 横向全屏
+                        ret.release();
+                    } catch(Exception e) {}
+
+                    fullScreenImageView.setVisibility(View.GONE);
+                    if (fsVideoView.getParent() != null) ((ViewGroup)fsVideoView.getParent()).removeView(fsVideoView);
+                    fullScreenContainer.addView(fsVideoView, 0);
+                    fsVideoView.setVideoPath(path); fsVideoView.start(); fsProgressBar.setVisibility(View.VISIBLE);
+                } else {
+                    if (fsVideoView.isPlaying()) fsVideoView.stopPlayback();
+                    if (fsVideoView.getParent() != null) ((ViewGroup)fsVideoView.getParent()).removeView(fsVideoView);
+                    fsProgressBar.setVisibility(View.GONE); 
+                    
+                    // 【优化：图片淡入淡出无缝翻页】
+                    if(alreadyFullscreen) {
+                        fullScreenImageView.animate().alpha(0f).setDuration(150).withEndAction(new Runnable() {
+                            public void run() {
+                                threadPool.execute(new Runnable() {
+                                    public void run() {
+                                        BitmapFactory.Options opts = new BitmapFactory.Options(); opts.inSampleSize = 2; opts.inPreferredConfig = Bitmap.Config.RGB_565;
+                                        final Bitmap bmp = BitmapFactory.decodeFile(path, opts);
+                                        mainHandler.post(new Runnable() { public void run() { if (bmp != null) fullScreenImageView.setImageBitmap(bmp); fullScreenImageView.animate().alpha(1f).setDuration(150).start(); } });
+                                    }
+                                });
+                            }
+                        }).start();
+                    } else {
+                        fullScreenImageView.setVisibility(View.VISIBLE);
+                        threadPool.execute(new Runnable() {
+                            public void run() {
+                                BitmapFactory.Options opts = new BitmapFactory.Options(); opts.inSampleSize = 2; opts.inPreferredConfig = Bitmap.Config.RGB_565;
+                                final Bitmap bmp = BitmapFactory.decodeFile(path, opts);
+                                mainHandler.post(new Runnable() { public void run() { if (bmp != null) fullScreenImageView.setImageBitmap(bmp); } });
+                            }
+                        });
+                    }
+                }
+                wm.updateViewLayout(rootContainer, params);
+            }
+        };
+
+        // ==========================================
+        // 重命名与删除
+        // ==========================================
+        renameBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                if(currentMedia[0].equals("")) return;
+                final File oldFile = new File(currentMedia[0]);
+                AlertDialog.Builder builder = new AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert);
+                builder.setTitle("重命名文件"); final EditText input = new EditText(context); input.setText(oldFile.getName()); input.setTextColor(Color.WHITE); builder.setView(input);
+                builder.setPositiveButton("保存", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface dialog, int which) {
+                        File newFile = new File(oldFile.getParent(), input.getText().toString());
+                        if(oldFile.renameTo(newFile)) { currentMedia[0] = newFile.getAbsolutePath(); mediaList.set(currentIndex[0], currentMedia[0]); tasker.showToast("重命名成功"); } else tasker.showToast("失败");
+                    }
+                });
+                builder.setNegativeButton("取消", null); AlertDialog dialog = builder.create(); dialog.getWindow().setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY); dialog.show();
+            }
+        });
+
+        deleteBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) {
+                if(currentMedia[0].equals("")) return;
+                AlertDialog.Builder builder = new AlertDialog.Builder(context, android.R.style.Theme_DeviceDefault_Dialog_Alert);
+                builder.setTitle("确认删除"); builder.setMessage("确定要删除此文件吗？无法恢复！\n" + new File(currentMedia[0]).getName());
+                builder.setPositiveButton("删除", new DialogInterface.OnClickListener() {
+                    public void onClick(DialogInterface dialog, int which) {
+                        if(new File(currentMedia[0]).delete()) { 
+                            tasker.showToast("已删除"); mediaList.set(currentIndex[0], ""); 
+                            View card = mediaListContainer.getChildAt(currentIndex[0]); if (card != null) card.setVisibility(View.GONE);
+                            goBack.run(); 
+                        } else tasker.showToast("删除失败");
+                    }
+                });
+                builder.setNegativeButton("取消", null); AlertDialog dialog = builder.create(); dialog.getWindow().setType(WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY); dialog.show();
+            }
+        });
+
+        // ==========================================
+        // 信息流引擎与视图生成
+        // ==========================================
+        final int[] loadedCount = new int[]{0};
+
+        final Runnable feedProgressUpdater = new Runnable() {
+            public void run() {
+                if (state[0] == 1) {
+                    for(int i=0; i<activeVideos.size(); i++) {
+                        Object[] data = (Object[]) activeVideos.get(i);
+                        VideoView vv = (VideoView) data[0]; SeekBar sb = (SeekBar) data[1];
+                        if(vv.isPlaying()) sb.setProgress(vv.getCurrentPosition());
+                    }
+                }
+                mainHandler.postDelayed(this, 1000);
+            }
+        };
+        mainHandler.post(feedProgressUpdater);
+
+        final Runnable renderNextBatch = new Runnable() {
+            public void run() {
+                int end = Math.min(loadedCount[0] + 30, mediaList.size());
+                for (int m = loadedCount[0]; m < end; m++) {
+                    final String path = (String) mediaList.get(m);
+                    final String lower = path.toLowerCase();
+                    final int listIndex = m;
+                    final long fileSize = new File(path).length();
+                    final String sizeStr = fileSize < 1048576 ? (fileSize/1024) + " KB" : String.format("%.1f MB", fileSize/1048576.0);
+
+                    final FrameLayout mediaFrame = new FrameLayout(context);
+                    mediaFrame.setTag(Integer.valueOf(listIndex));
+                    LinearLayout.LayoutParams fp = new LinearLayout.LayoutParams(-1, (int)(250*dp)); fp.setMargins(0, 0, 0, (int)(16*dp)); mediaFrame.setLayoutParams(fp);
+                    GradientDrawable cardBg = new GradientDrawable(); cardBg.setColor(Color.parseColor("#1f1f1f")); cardBg.setCornerRadius(16 * dp);
+                    mediaFrame.setBackground(cardBg); mediaFrame.setClipToOutline(true); 
+
+                    final ImageView thumbView = new ImageView(context);
+                    thumbView.setLayoutParams(new FrameLayout.LayoutParams(-1, -1)); thumbView.setScaleType(ImageView.ScaleType.CENTER_CROP); mediaFrame.addView(thumbView);
+
+                    if (lower.endsWith(".mp4") || lower.endsWith(".webm") || lower.endsWith(".mkv")) {
+                        final TextView playBtn = new TextView(context); playBtn.setText("▶"); playBtn.setTextSize(36); playBtn.setTextColor(Color.WHITE); playBtn.setGravity(Gravity.CENTER);
+                        playBtn.setLayoutParams(new FrameLayout.LayoutParams(-1, -1)); mediaFrame.addView(playBtn);
+
+                        final TextView sizeTxt = new TextView(context); sizeTxt.setText(sizeStr); sizeTxt.setTextColor(Color.WHITE); sizeTxt.setTextSize(10); sizeTxt.setPadding(10,5,10,5); sizeTxt.setBackgroundColor(Color.parseColor("#99000000"));
+                        FrameLayout.LayoutParams lpSize = new FrameLayout.LayoutParams(-2, -2); lpSize.gravity = Gravity.BOTTOM | Gravity.LEFT; lpSize.setMargins((int)(8*dp), 0, 0, (int)(24*dp)); sizeTxt.setLayoutParams(lpSize); mediaFrame.addView(sizeTxt);
+
+                        final TextView timeTxt = new TextView(context); timeTxt.setTextColor(Color.WHITE); timeTxt.setTextSize(10); timeTxt.setPadding(10,5,10,5); timeTxt.setBackgroundColor(Color.parseColor("#99000000"));
+                        FrameLayout.LayoutParams lpTime = new FrameLayout.LayoutParams(-2, -2); lpTime.gravity = Gravity.BOTTOM | Gravity.RIGHT; lpTime.setMargins(0, 0, (int)(8*dp), (int)(24*dp)); timeTxt.setLayoutParams(lpTime); mediaFrame.addView(timeTxt);
+
+                        final SeekBar inlineSeekBar = new SeekBar(context); FrameLayout.LayoutParams sbLp = new FrameLayout.LayoutParams(-1, -2); sbLp.gravity = Gravity.BOTTOM; inlineSeekBar.setLayoutParams(sbLp); mediaFrame.addView(inlineSeekBar);
+
+                        inlineSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+                            public void onProgressChanged(SeekBar sb, int prog, boolean fromUser) { if(fromUser) { for(int i=0; i<activeVideos.size(); i++) { Object[] data = (Object[]) activeVideos.get(i); if(data[1] == sb) { ((VideoView)data[0]).seekTo(prog); break; } } } }
+                            public void onStartTrackingTouch(SeekBar sb) {} public void onStopTrackingTouch(SeekBar sb) {}
+                        });
+
+                        threadPool.execute(new Runnable() {
+                            public void run() {
+                                final Bitmap bmp = ThumbnailUtils.createVideoThumbnail(path, MediaStore.Video.Thumbnails.MINI_KIND);
+                                long dur = 0; MediaMetadataRetriever ret = new MediaMetadataRetriever();
+                                try { ret.setDataSource(path); dur = Long.parseLong(ret.extractMetadata(9)); } catch(Exception e){} finally{ret.release();}
+                                final long finalDur = dur;
+                                mainHandler.post(new Runnable() { public void run() { 
+                                    if (bmp != null) thumbView.setImageBitmap(bmp); 
+                                    int sec = (int)(finalDur/1000)%60; int min = (int)((finalDur/(1000*60))%60); timeTxt.setText(String.format("%02d:%02d", min, sec));
+                                    inlineSeekBar.setMax((int)finalDur);
+                                } });
+                            }
+                        });
+
+                        android.view.GestureDetector.OnGestureListener vGI = new android.view.GestureDetector.OnGestureListener() {
+                            public boolean onDown(MotionEvent e) { return true; } public void onShowPress(MotionEvent e) {} public void onLongPress(MotionEvent e) {} public boolean onFling(MotionEvent e1, MotionEvent e2, float vX, float vY) { return false; }
+                            public boolean onSingleTapUp(MotionEvent e) { return false; }
+                            public boolean onScroll(MotionEvent e1, MotionEvent e2, float dX, float dY) {
+                                if (Math.abs(dX) > Math.abs(dY)) {
+                                    for(int i=0; i<activeVideos.size(); i++) {
+                                        Object[] data = (Object[]) activeVideos.get(i); VideoView vv = (VideoView) data[0];
+                                        if(vv.getTag() != null && vv.getTag().equals(path)) { vv.seekTo(vv.getCurrentPosition() + (int)(-dX * 50)); return true; }
+                                    }
+                                } return false;
+                            }
+                        };
+                        android.view.GestureDetector.OnDoubleTapListener vDI = new android.view.GestureDetector.OnDoubleTapListener() {
+                            public boolean onDoubleTapEvent(MotionEvent e) { return false; }
+                            public boolean onSingleTapConfirmed(MotionEvent e) {
+                                boolean found = false;
+                                for(int i=0; i<activeVideos.size(); i++) {
+                                    Object[] data = (Object[]) activeVideos.get(i); VideoView vv = (VideoView) data[0];
+                                    if(vv.getTag() != null && vv.getTag().equals(path)) {
+                                        found = true; if(vv.isPlaying()) { vv.pause(); playBtn.setVisibility(View.VISIBLE); } else { vv.start(); playBtn.setVisibility(View.GONE); } break;
+                                    }
+                                }
+                                if(!found) {
+                                    if(activeVideos.size() >= 3) { 
+                                        Object[] oldest = (Object[]) activeVideos.remove(0); VideoView ov = (VideoView) oldest[0]; ov.stopPlayback(); if(ov.getParent() != null) ((ViewGroup)ov.getParent()).removeView(ov);
+                                        ((ImageView)oldest[2]).setVisibility(View.VISIBLE); ((TextView)oldest[3]).setVisibility(View.VISIBLE);
+                                    }
+                                    VideoView newVv = new VideoView(context); newVv.setTag(path); 
+                                    FrameLayout.LayoutParams vp = new FrameLayout.LayoutParams(-1, -1); vp.gravity = Gravity.CENTER; newVv.setLayoutParams(vp); // 竖屏视频绝对居中
+                                    mediaFrame.addView(newVv, 0); newVv.setVideoPath(path); newVv.start();
+                                    thumbView.setVisibility(View.GONE); playBtn.setVisibility(View.GONE);
+                                    activeVideos.add(new Object[]{newVv, inlineSeekBar, thumbView, playBtn});
+                                } return true;
+                            }
+                            public boolean onDoubleTap(MotionEvent e) { currentIndex[0] = listIndex; renderFullScreen.run(); return true; }
+                        };
+                        final GestureDetector vDet = new GestureDetector(context, vGI); vDet.setOnDoubleTapListener(vDI);
+                        mediaFrame.setOnTouchListener(new View.OnTouchListener() { public boolean onTouch(View v, MotionEvent e) { return vDet.onTouchEvent(e); } });
+
+                    } else {
+                        final TextView sizeTxt = new TextView(context); sizeTxt.setText(sizeStr); sizeTxt.setTextColor(Color.WHITE); sizeTxt.setTextSize(10); sizeTxt.setPadding(10,5,10,5); sizeTxt.setBackgroundColor(Color.parseColor("#99000000"));
+                        FrameLayout.LayoutParams lpSize = new FrameLayout.LayoutParams(-2, -2); lpSize.gravity = Gravity.BOTTOM | Gravity.RIGHT; lpSize.setMargins(0, 0, (int)(8*dp), (int)(8*dp)); sizeTxt.setLayoutParams(lpSize); mediaFrame.addView(sizeTxt);
+
+                        threadPool.execute(new Runnable() {
+                            public void run() {
+                                BitmapFactory.Options opts = new BitmapFactory.Options(); opts.inSampleSize = 4; opts.inPreferredConfig = Bitmap.Config.RGB_565;
+                                final Bitmap bmp = BitmapFactory.decodeFile(path, opts); mainHandler.post(new Runnable() { public void run() { if (bmp != null) thumbView.setImageBitmap(bmp); } });
+                            }
+                        });
+                        mediaFrame.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { currentIndex[0] = listIndex; renderFullScreen.run(); } });
+                    }
+                    mediaListContainer.addView(mediaFrame);
+                }
+                
+                loadedCount[0] = end;
+                if (loadedCount[0] < mediaList.size()) {
+                    Button loadMoreBtn = new Button(context); loadMoreBtn.setText("👇 加载更多"); loadMoreBtn.setTextColor(Color.WHITE);
+                    GradientDrawable lmBg = new GradientDrawable(); lmBg.setColor(Color.parseColor("#333333")); lmBg.setCornerRadius(50*dp); loadMoreBtn.setBackground(lmBg);
+                    LinearLayout.LayoutParams lmLp = new LinearLayout.LayoutParams(-1, (int)(45*dp)); lmLp.setMargins(0, (int)(16*dp), 0, (int)(32*dp)); loadMoreBtn.setLayoutParams(lmLp);
+                    loadMoreBtn.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { mediaListContainer.removeView(v); renderNextBatch.run(); } });
+                    mediaListContainer.addView(loadMoreBtn);
+                }
+            }
+        };
+
+        // ==========================================
+        // 初始设置更新逻辑
+        // ==========================================
+        final Runnable refreshList = new Runnable() {
+            public void run() {
+                pathListContainer.removeAllViews();
+                String[] pathArr = configPaths[0].split("\n");
+                for (int i = 0; i < pathArr.length; i++) {
+                    final String p = pathArr[i].trim(); if (p.length() == 0) continue;
+
+                    TextView tName = new TextView(context); tName.setText("📁 " + p); tName.setTextColor(Color.WHITE);
+                    tName.setPadding((int)(16*dp), (int)(16*dp), (int)(16*dp), (int)(16*dp)); tName.setTextSize(14);
+                    GradientDrawable cBg = new GradientDrawable(); cBg.setColor(Color.parseColor("#1f1f1f")); cBg.setCornerRadius(16 * dp); tName.setBackground(cBg);
+                    LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-1, -2); cp.setMargins(0, 0, 0, (int)(12*dp)); tName.setLayoutParams(cp); pathListContainer.addView(tName);
+
+                    tName.setOnClickListener(new View.OnClickListener() {
+                        public void onClick(View v) {
+                            tasker.showToast("深搜加载中..."); mediaList.clear(); ArrayList dirs = new ArrayList(); dirs.add(new File(p)); String[] suffixes = configSuffixes[0].toLowerCase().split(",");
+                            while (dirs.size() > 0) {
+                                File curr = (File) dirs.remove(0); File[] files = curr.listFiles();
+                                if (files != null) { for (int j=0; j<files.length; j++) { File f = files[j]; if (f.isDirectory()) dirs.add(f); else { String name = f.getName().toLowerCase(); for(int k=0; k<suffixes.length; k++) if(name.endsWith(suffixes[k].trim())) { mediaList.add(f.getAbsolutePath()); break; } } } }
+                            }
+                            if (mediaList.size() == 0) { tasker.showToast("无匹配文件"); return; }
+                            
+                            mediaListContainer.removeAllViews(); loadedCount[0] = 0; renderNextBatch.run();
+                            state[0] = 1;
+                            
+                            pathViewContainer.animate().alpha(0f).scaleX(0.9f).scaleY(0.9f).setDuration(250).withEndAction(new Runnable(){
+                                public void run() { pathViewContainer.setVisibility(View.GONE); }
+                            }).start();
+                            
+                            feedLayer.setAlpha(0f); feedLayer.setScaleX(0.9f); feedLayer.setScaleY(0.9f); feedLayer.setVisibility(View.VISIBLE);
+                            feedLayer.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(250).start();
+                            
+                            params.width = -1; params.height = -1; params.x = 0; params.y = 0;
+                            panelView.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
+                            wm.updateViewLayout(rootContainer, params);
+                        }
+                    });
+                }
+            }
+        };
+
+        settingsBtn.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { state[0] = 3; pathViewContainer.setVisibility(View.GONE); settingsContainer.setVisibility(View.VISIBLE); params.flags &= ~FLAG_NOT_FOCUSABLE; wm.updateViewLayout(rootContainer, params); } });
+        cancelBtn.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { state[0] = 0; settingsContainer.setVisibility(View.GONE); pathViewContainer.setVisibility(View.VISIBLE); params.flags |= FLAG_NOT_FOCUSABLE; wm.updateViewLayout(rootContainer, params); } });
+        saveBtn.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { configPaths[0] = pathEdit.getText().toString(); configSuffixes[0] = suffixEdit.getText().toString(); tasker.setVariable("ViewerPaths", configPaths[0]); tasker.setVariable("ViewerSuffixes", configSuffixes[0]); refreshList.run(); cancelBtn.performClick(); tasker.showToast("设置已保存"); }
+        });
+        refreshList.run();
+
+        // ==========================================
+        // 全屏独立播放器与图库手势处理 (新增长按切视频)
+        // ==========================================
+        final Runnable fsUpdateProgress = new Runnable() {
+            public void run() { if(fsVideoView.isPlaying()) { fsProgressBar.setMax(fsVideoView.getDuration()); fsProgressBar.setProgress(fsVideoView.getCurrentPosition()); } if(state[0] == 2) mainHandler.postDelayed(this, 1000); }
+        };
+        fsProgressBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            public void onProgressChanged(SeekBar sb, int prog, boolean fromUser) { if(fromUser) fsVideoView.seekTo(prog); } public void onStartTrackingTouch(SeekBar sb) {} public void onStopTrackingTouch(SeekBar sb) {}
+        });
+
+        android.view.GestureDetector.OnGestureListener fsVGI = new android.view.GestureDetector.OnGestureListener() {
+            public boolean onDown(MotionEvent e) { return true; } public void onShowPress(MotionEvent e) {} public boolean onSingleTapUp(MotionEvent e) { return false; } 
+            
+            // 【新增】：长按半屏切换视频
+            public void onLongPress(MotionEvent e) {
+                if (e.getRawX() < screenW / 2) { // 左半边长按：上一个
+                    do { currentIndex[0]--; } while(currentIndex[0] >= 0 && mediaList.get(currentIndex[0]).equals(""));
+                    if(currentIndex[0] >= 0) renderFullScreen.run(); else { tasker.showToast("已是第一部"); currentIndex[0]++; }
+                } else { // 右半边长按：下一个
+                    do { currentIndex[0]++; } while(currentIndex[0] < mediaList.size() && mediaList.get(currentIndex[0]).equals(""));
+                    if(currentIndex[0] < mediaList.size()) renderFullScreen.run(); else { tasker.showToast("已是最后一部"); currentIndex[0]--; }
+                }
+            } 
+            
+            public boolean onFling(MotionEvent e1, MotionEvent e2, float vX, float vY) { return false; }
+            public boolean onScroll(MotionEvent e1, MotionEvent e2, float dX, float dY) { if (Math.abs(dX) > Math.abs(dY)) { fsVideoView.seekTo(fsVideoView.getCurrentPosition() + (int)(-dX * 50)); return true; } return false; }
+        };
+        android.view.GestureDetector.OnDoubleTapListener fsVDI = new android.view.GestureDetector.OnDoubleTapListener() {
+            public boolean onDoubleTapEvent(MotionEvent e) { return false; }
+            public boolean onSingleTapConfirmed(MotionEvent e) { if (fsVideoView.isPlaying()) fsVideoView.pause(); else fsVideoView.start(); return true; }
+            public boolean onDoubleTap(MotionEvent e) { if (state[0] == 2) goBack.run(); return true; }
+        };
+        final GestureDetector fsVDet = new GestureDetector(context, fsVGI); fsVDet.setOnDoubleTapListener(fsVDI);
+        fsVideoView.setOnTouchListener(new View.OnTouchListener() { public boolean onTouch(View v, MotionEvent e) { return fsVDet.onTouchEvent(e); } });
+
+        android.view.GestureDetector.OnGestureListener imgGI = new android.view.GestureDetector.OnGestureListener() {
+            public boolean onDown(MotionEvent e) { return true; } public void onShowPress(MotionEvent e) {} 
+            public boolean onSingleTapUp(MotionEvent e) { goBack.run(); return true; } 
+            public void onLongPress(MotionEvent e) {} public boolean onScroll(MotionEvent e1, MotionEvent e2, float dX, float dY) { return false; }
+            public boolean onFling(MotionEvent e1, MotionEvent e2, float vX, float vY) {
+                float dX = e1.getX() - e2.getX();
+                if (Math.abs(dX) > 50*dp && Math.abs(vX) > 200) {
+                    if (dX > 0) { do { currentIndex[0]++; } while(currentIndex[0] < mediaList.size() && mediaList.get(currentIndex[0]).equals("")); if(currentIndex[0] < mediaList.size()) renderFullScreen.run(); else { tasker.showToast("已是最后一张"); currentIndex[0]--; } } 
+                    else { do { currentIndex[0]--; } while(currentIndex[0] >= 0 && mediaList.get(currentIndex[0]).equals("")); if(currentIndex[0] >= 0) renderFullScreen.run(); else { tasker.showToast("已是第一张"); currentIndex[0]++; } } return true;
+                } return false;
+            }
+        };
+        final GestureDetector imgDet = new GestureDetector(context, imgGI); fullScreenImageView.setOnTouchListener(new View.OnTouchListener() { public boolean onTouch(View v, MotionEvent e) { return imgDet.onTouchEvent(e); } });
+
+        // ==========================================
+        // 球与面板的呼吸过渡切换
+        // ==========================================
+        rootContainer.addView(panelView); rootContainer.addView(ballView); wm.addView(rootContainer, params);
+        
+        rootContainer.setOnTouchListener(new View.OnTouchListener() {
+            public boolean onTouch(View v, MotionEvent event) {
+                if (event.getAction() == MotionEvent.ACTION_OUTSIDE) {
+                    if (panelView.getVisibility() == View.VISIBLE && (state[0] == 0 || state[0] == 3)) {
+                        panelPos[0] = params.x; panelPos[1] = params.y; params.x = ballPos[0]; params.y = ballPos[1];   
+                        params.width = -2; params.height = -2; wm.updateViewLayout(rootContainer, params);
+                        
+                        panelView.animate().alpha(0f).scaleX(0.8f).scaleY(0.8f).setDuration(250).withEndAction(new Runnable(){
+                            public void run() { panelView.setVisibility(View.GONE); }
+                        }).start();
+                        ballView.setAlpha(0f); ballView.setScaleX(0.5f); ballView.setScaleY(0.5f); ballView.setVisibility(View.VISIBLE); 
+                        ballView.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(250).start();
+                        return true;
+                    }
+                } return false;
+            }
+        });
+
+        final float[] touchState = new float[]{0, 0, 0, 0}; final boolean[] isMoving = new boolean[]{false}; final boolean[] isLongPressed = new boolean[]{false};
+        final Runnable longPressTrigger = new Runnable() {
+            public void run() { isLongPressed[0] = true; if (fsVideoView.isPlaying()) fsVideoView.stopPlayback(); wm.removeView(rootContainer); threadPool.shutdown(); tasker.showToast("已彻底关闭"); }
+        };
+
+        ballView.setOnTouchListener(new View.OnTouchListener() {
+            public boolean onTouch(View v, MotionEvent event) {
+                switch (event.getAction()) {
+                    case MotionEvent.ACTION_DOWN:
+                        touchState[0] = event.getRawX(); touchState[1] = event.getRawY(); touchState[2] = params.x; touchState[3] = params.y;
+                        isMoving[0] = false; isLongPressed[0] = false; mainHandler.postDelayed(longPressTrigger, 600); return true;
+                    case MotionEvent.ACTION_MOVE:
+                        float dx = event.getRawX() - touchState[0]; float dy = event.getRawY() - touchState[1];
+                        if (Math.abs(dx) > 10 || Math.abs(dy) > 10) { isMoving[0] = true; mainHandler.removeCallbacks(longPressTrigger); }
+                        params.x = (int)(touchState[2] + dx); params.y = (int)(touchState[3] + dy); wm.updateViewLayout(rootContainer, params); return true;
+                    case MotionEvent.ACTION_UP:
+                    case MotionEvent.ACTION_CANCEL:
+                        mainHandler.removeCallbacks(longPressTrigger); if (isLongPressed[0]) return true; 
+                        if (!isMoving[0]) {
+                            ballPos[0] = params.x; ballPos[1] = params.y; params.x = panelPos[0]; params.y = panelPos[1]; wm.updateViewLayout(rootContainer, params);
+                            ballView.animate().alpha(0f).scaleX(0.5f).scaleY(0.5f).setDuration(250).withEndAction(new Runnable(){
+                                public void run() { ballView.setVisibility(View.GONE); }
+                            }).start();
+                            panelView.setAlpha(0f); panelView.setScaleX(0.8f); panelView.setScaleY(0.8f); panelView.setVisibility(View.VISIBLE); 
+                            panelView.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(250).start();
+                        } else { params.x = (params.x + 30*dp > screenW / 2) ? screenW : 0; ballPos[0] = params.x; ballPos[1] = params.y; wm.updateViewLayout(rootContainer, params); } return true;
+                } return false;
+            }
+        });
+
+        params.x = panelPos[0]; params.y = panelPos[1]; wm.updateViewLayout(rootContainer, params);
+        
+    }
+});
