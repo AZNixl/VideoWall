@@ -262,8 +262,8 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout ctrlStrip;
         LinearLayout bottomOverlay;
         TextView toggleButton;
-        /** 「全屏 / 还原」键，放在格内信息行末尾。 */
-        TextView zoomButton;
+        /** 「全屏 / 还原」键。逐格控制条的第四个键，用矢量图标而不是文字。 */
+        ImageView zoomButton;
         boolean userSeeking;
         boolean highlighted;
         /** 这一格已被作废（reset 过或已解码失败）。迟到的 onPrepared 一律不再当作有效事件。 */
@@ -1444,15 +1444,6 @@ public class MainActivity extends AppCompatActivity {
         metaLp.setMargins(d(5), 0, 0, 0);
         metaRow.addView(c.nameLabel, metaLp);
 
-        // 「全屏 / 还原」放在信息行末尾，而不是塞进逐格控制条 ——
-        // 那排已经有 4 个键（−10 / ▶‖ / +10 / ↻），2 列排布下格子只有 ~178dp 宽，
-        // 再加一个必然挤爆。信息行本来就是"编号 + 文件名"的横向布局，末尾挂个小键正合适。
-        c.zoomButton = miniButton("全屏", v -> toggleZoom(index));
-        LinearLayout.LayoutParams zoomLp = new LinearLayout.LayoutParams(-2, -2);
-        zoomLp.setMargins(d(5), 0, 0, 0);
-        c.zoomButton.setLayoutParams(zoomLp);
-        metaRow.addView(c.zoomButton);
-
         // 底部叠层：编号/文件名 + 逐格控制条 + 进度条
         LinearLayout bottomOverlay = new LinearLayout(this);
         bottomOverlay.setOrientation(LinearLayout.VERTICAL);
@@ -1468,12 +1459,14 @@ public class MainActivity extends AppCompatActivity {
         c.ctrlStrip.setPadding(0, 0, 0, d(2));
 
         final int fixIdx = index;
+        // 顺序固定：−10s ｜ ▶/‖ ｜ +10s ｜ 全屏。
+        // 重播键（↻）已按需求去掉。
         c.ctrlStrip.addView(miniButton("−10", v -> seekBy(fixIdx, -SEEK_STEP_MS)));
         c.toggleButton = miniButton("▶", v -> toggleCell(fixIdx));
         c.ctrlStrip.addView(c.toggleButton);
         c.ctrlStrip.addView(miniButton("+10", v -> seekBy(fixIdx, SEEK_STEP_MS)));
-        // 逐格重播：四路长短不一，一起重播没意义，得能单独把这一格拉回开头
-        c.ctrlStrip.addView(miniButton("↻", v -> replayCell(fixIdx)));
+        c.zoomButton = miniIconButton(R.drawable.ic_fullscreen, v -> toggleZoom(fixIdx));
+        c.ctrlStrip.addView(c.zoomButton);
         bottomOverlay.addView(c.ctrlStrip);
 
         c.sb = new SeekBar(this);
@@ -1599,17 +1592,6 @@ public class MainActivity extends AppCompatActivity {
         if (duration > 0 && target > duration) target = duration;
         mpSeekTo(c, (int) target);
         c.sb.setProgress((int) target);
-        showControls();
-    }
-
-    /** 只把这一格拉回开头重播，不影响其他几路。 */
-    private void replayCell(int index) {
-        Cell c = cells[index];
-        if (c == null || c.mp == null) return;
-        mpSeekTo(c, 0);
-        mpStart(c);
-        c.sb.setProgress(0);
-        updateCellChrome();
         showControls();
     }
 
@@ -2321,7 +2303,8 @@ public class MainActivity extends AppCompatActivity {
                     ? View.VISIBLE : View.GONE);
             // 「全屏/还原」跟着控制条显隐走（它是个操作，不是信息，不受"信息常显"设置影响）
             c.zoomButton.setVisibility(controlsVisible && hasVideo ? View.VISIBLE : View.GONE);
-            c.zoomButton.setText(zoomed == i ? "还原" : "全屏");
+            c.zoomButton.setImageResource(zoomed == i
+                    ? R.drawable.ic_fullscreen_exit : R.drawable.ic_fullscreen);
             c.toggleButton.setText(paused ? "▶" : "‖");
             c.stateIcon.setVisibility(paused && !controlsVisible ? View.VISIBLE : View.GONE);
 
@@ -2704,23 +2687,47 @@ public class MainActivity extends AppCompatActivity {
         return b;
     }
 
+    /**
+     * 逐格控制条上的文字键。
+     *
+     * 尺寸压得比别处小：2×2 在 360dp 竖屏下每格只有约 178dp 宽，
+     * 而这一排要放下 4 个键（−10 / ▶‖ / +10 / 全屏），每个连同间距不能超过 44dp。
+     */
     private TextView miniButton(String text, View.OnClickListener l) {
         TextView b = new TextView(this);
         b.setText(text);
         b.setTextColor(Color.WHITE);
         b.setTextSize(12);
         b.setGravity(Gravity.CENTER);
-        b.setMinWidth(d(42));
-        b.setPadding(d(9), d(5), d(9), d(5));
+        b.setSingleLine(true);
+        b.setMinWidth(d(36));
+        b.setPadding(d(6), d(5), d(6), d(5));
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(OVER_VIDEO_BTN);
         bg.setCornerRadius(50 * dp);
         b.setBackground(bg);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-        lp.setMargins(d(3), 0, d(3), 0);
+        lp.setMargins(d(2), 0, d(2), 0);
         b.setLayoutParams(lp);
         b.setOnClickListener(l);
         return b;
+    }
+
+    /** 逐格控制条上的图标键，尺寸与 [miniButton] 对齐。 */
+    private ImageView miniIconButton(int drawableRes, View.OnClickListener l) {
+        ImageView iv = new ImageView(this);
+        iv.setImageResource(drawableRes);
+        iv.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        iv.setPadding(d(8), d(8), d(8), d(8));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(OVER_VIDEO_BTN);
+        bg.setCornerRadius(50 * dp);
+        iv.setBackground(bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(d(36), d(36));
+        lp.setMargins(d(2), 0, d(2), 0);
+        iv.setLayoutParams(lp);
+        iv.setOnClickListener(l);
+        return iv;
     }
 
     private TextView hint(String s) {
