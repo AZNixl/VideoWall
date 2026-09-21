@@ -11,6 +11,7 @@
 ## v3.0 — 点视频画面没反应（又一个 SurfaceView 触摸坑）
 
 **现象**：播放时点格子的**黑边**有反应，点**视频画面**没反应。
+（本版同时配好了正式签名，见文末「发版」。）
 
 **取证过程**：给三条点击通路各打一条不同标记的日志，再用 `adb shell input tap` 逐点验证：
 
@@ -310,6 +311,26 @@ navigationBars        [0,3168][1440,3168]  高度 0（沉浸式下已隐藏）
 视频一多就卡，连点还会丢事件。改成**只刷新被点那一项的外观 + 底部槽位**，不整表重建。
 
 ---
+
+## 附：发版与正式签名
+
+- **下载**：<https://github.com/AZNixl/VideoWall/releases>
+- Release 由 GitHub Actions 在推 `v*` 标签时自动构建并附上 APK
+- 签名密钥存在仓库的 Actions Secrets 里（`KEYSTORE_BASE64` / `KEYSTORE_PASSWORD` /
+  `KEY_ALIAS` / `KEY_PASSWORD`），CI 构建时还原成 `keystore.properties`，
+  构建完用 `apksigner verify --print-certs` 打印证书，便于核对
+
+当前发布证书：
+
+```
+V2 Signer: certificate DN: CN=AZNixl, OU=VideoWall, O=AZNixl, C=CN
+V2 Signer: certificate SHA-256 digest: fede0f7edfce94fe09625a77fad6fda8a754af6e670e5ac2b9a9e3b60460e1ba
+V2 Signer: certificate SHA-1 digest:   030a58fa4031d26e7fe5cba78edcc7a06d5d3231
+```
+
+**这个指纹要和本地 release 构建的一致** —— 否则 CI 出的包没法覆盖安装在本机那个
+（Android 不允许用不同密钥覆盖安装）。核对方法：
+`apksigner verify --print-certs app-release.apk`。
 
 ## 附：工程侧踩过的坑
 

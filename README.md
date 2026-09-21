@@ -3,6 +3,7 @@
 至多 4 路视频同时铺满屏幕播放的 Android 应用。
 
 - 项目地址：<https://github.com/AZNixl/VideoWall>
+- **下载**：<https://github.com/AZNixl/VideoWall/releases> —— 取 `app-release.apk`，用发布密钥签名
 - 包名 `com.aznixl.videowall` · minSdk 24 / targetSdk 36
 - 第三方依赖只有 **Material Components**（Material 3 主题 + 明暗切换）
 - 视频解码/渲染全部走平台 API：`VideoView` / `MediaPlayer`
