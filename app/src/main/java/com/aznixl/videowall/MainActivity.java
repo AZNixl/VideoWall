@@ -128,6 +128,18 @@ public class MainActivity extends AppCompatActivity {
     private int insetRight;
     /** 系统手势区（底部"上滑回桌面"那条）的高度。用来把最下排的控件抬出去。 */
     private int insetGestureBottom;
+    /**
+     * 系统手势区在左右两侧的宽度。
+     *
+     * 实测（OnePlus PJZ110 + 手势导航）：竖屏下 systemGestures 是
+     *   left  [0,0][120,3168]      ← 左边缘 120px（30dp）整条
+     *   right [1320,0][1440,3168]  ← 右边缘 120px 整条
+     *   bottom 高度 0（导航栏在沉浸式下已隐藏）
+     * 也就是说**冲突在左右两侧，不在底部** —— 进度条横跨整格宽度，
+     * 最外两列的进度条末端正落在手势带里，拖到边上就触发返回手势。
+     */
+    private int insetGestureLeft;
+    private int insetGestureRight;
 
     // ---- 数据
     private final List<Item> allItems = new ArrayList<>();
@@ -176,6 +188,13 @@ public class MainActivity extends AppCompatActivity {
     private int appliedCols = 2;
     /** 当前行数。用来判断哪些格子在最下排（最下排的控件要抬离系统手势区）。 */
     private int appliedRows = 2;
+    /**
+     * 正在"放大为全屏"的那一格；-1 表示没有。
+     * 放大时该格独占整个容器，其余格子隐藏并**暂停**（不是释放）。
+     */
+    private int zoomed = -1;
+    /** 放大前哪些格在播，用于还原时把它们接着放回去。 */
+    private final boolean[] wasPlayingBeforeZoom = new boolean[MAX_CELLS];
     /** 「降到 2 路」的建议每次播放最多弹一次。 */
     private boolean degradeSuggested;
     /** 进播放页的操作提示每次启动只提示一次，别每次播放都烦人。 */
@@ -243,6 +262,8 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout ctrlStrip;
         LinearLayout bottomOverlay;
         TextView toggleButton;
+        /** 「全屏 / 还原」键，放在格内信息行末尾。 */
+        TextView zoomButton;
         boolean userSeeking;
         boolean highlighted;
         /** 这一格已被作废（reset 过或已解码失败）。迟到的 onPrepared 一律不再当作有效事件。 */
@@ -505,6 +526,8 @@ public class MainActivity extends AppCompatActivity {
             int l;
             int r;
             int g = 0;
+            int gl = 0;
+            int gr = 0;
             if (Build.VERSION.SDK_INT >= 30) {
                 Insets bars = insets.getInsets(
                         WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
@@ -512,21 +535,30 @@ public class MainActivity extends AppCompatActivity {
                 b = bars.bottom;
                 l = bars.left;
                 r = bars.right;
-                g = insets.getInsets(WindowInsets.Type.systemGestures()).bottom;
+                Insets ges = insets.getInsets(WindowInsets.Type.systemGestures());
+                g = ges.bottom;
+                gl = ges.left;
+                gr = ges.right;
             } else {
                 t = legacyTop(insets);
                 b = legacyBottom(insets);
                 l = legacyLeft(insets);
                 r = legacyRight(insets);
-                if (Build.VERSION.SDK_INT >= 29) g = legacyGestureBottom(insets);
+                if (Build.VERSION.SDK_INT >= 29) {
+                    g = legacyGestureBottom(insets);
+                    gl = legacyGestureLeft(insets);
+                    gr = legacyGestureRight(insets);
+                }
             }
             if (t > insetTop || b > insetBottom || l > insetLeft || r > insetRight
-                    || g > insetGestureBottom) {
+                    || g > insetGestureBottom || gl > insetGestureLeft || gr > insetGestureRight) {
                 insetTop = Math.max(insetTop, t);
                 insetBottom = Math.max(insetBottom, b);
                 insetLeft = Math.max(insetLeft, l);
                 insetRight = Math.max(insetRight, r);
                 insetGestureBottom = Math.max(insetGestureBottom, g);
+                insetGestureLeft = Math.max(insetGestureLeft, gl);
+                insetGestureRight = Math.max(insetGestureRight, gr);
                 applyInsetPadding();
             }
             return insets;
@@ -572,6 +604,16 @@ public class MainActivity extends AppCompatActivity {
         return i.getSystemGestureInsets().bottom;
     }
 
+    @SuppressWarnings("deprecation")
+    private int legacyGestureLeft(WindowInsets i) {
+        return i.getSystemGestureInsets().left;
+    }
+
+    @SuppressWarnings("deprecation")
+    private int legacyGestureRight(WindowInsets i) {
+        return i.getSystemGestureInsets().right;
+    }
+
     private void applyInsetPadding() {
         if (pickView != null) {
             pickView.setPadding(insetLeft, insetTop, insetRight, 0);
@@ -586,13 +628,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * 把**最下排**格子的控件从屏幕底边往上抬。
+     * 把格内控件从屏幕边缘让开。
      *
-     * 抬升量 = 系统手势区高度 + 一点余量。只给最下排加，因为：
-     *   · 2×2 时下排两格的控件正贴在屏幕底边，落在「上滑回桌面」的手势区里 ——
-     *     拖进度条时手指一起划，手势会被系统抢走，控件很难点准；
-     *   · 上排的控件在屏幕竖直中线附近，本来就不挨着边缘，不需要动。
-     * 1×4 / 1×3 这种单行排布，那一行同时也是最下排，同样会被抬起来。
+     * 两个方向都要让：
+     *   · **上下**：最下排的控件按底部手势区高度往上抬（有些设备的手势区在底部）。
+     *   · **左右**：首列/末列的控件按左右手势区宽度往里缩。
+     *     实测 OnePlus PJZ110 竖屏下手势区就是左右各 120px 的整条边 ——
+     *     进度条横跨整格宽度，最外两列的进度条末端正好压在返回手势上，
+     *     拖到边上就把系统手势触发了。这才是"跟系统手势冲突"的主因。
      */
     private void applyCellChromeInsets() {
         if (cells[0] == null) return;
@@ -602,13 +645,25 @@ public class MainActivity extends AppCompatActivity {
         for (int i = 0; i < MAX_CELLS; i++) {
             Cell c = cells[i];
             if (c == null || c.bottomOverlay == null) continue;
+
+            int col = i % cols;
+            boolean leftEdge = col == 0;
+            boolean rightEdge = col == cols - 1;
             boolean bottomRow = (i / cols) == (rows - 1);
+
+            int wantBottom = bottomRow ? lift : d(6);
+            int wantLeft = leftEdge ? insetGestureLeft + d(8) : d(6);
+            int wantRight = rightEdge ? insetGestureRight + d(8) : d(6);
+
             if (c.bottomOverlay.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp =
                         (FrameLayout.LayoutParams) c.bottomOverlay.getLayoutParams();
-                int want = bottomRow ? lift : d(6);
-                if (lp.bottomMargin != want) {
-                    lp.bottomMargin = want;
+                if (lp.bottomMargin != wantBottom
+                        || lp.leftMargin != wantLeft
+                        || lp.rightMargin != wantRight) {
+                    lp.bottomMargin = wantBottom;
+                    lp.leftMargin = wantLeft;
+                    lp.rightMargin = wantRight;
                     c.bottomOverlay.setLayoutParams(lp);
                 }
             }
@@ -1277,6 +1332,8 @@ public class MainActivity extends AppCompatActivity {
         // 布局键直接显示当前排布（2×2 / 1×4），比"排布·2×2"短，5 个键才放得下
         layoutButton = pillFlat("2×2", null);
         layoutButton.setOnClickListener(v -> {
+            // 放大态下排布被那一格占着，先退出放大，否则改了排布看不出任何变化
+            if (zoomed >= 0) restoreFromZoom();
             prefs.setLayoutMode(prefs.layoutMode() == Prefs.LAYOUT_ROW ? Prefs.LAYOUT_GRID : Prefs.LAYOUT_ROW);
             applyLayoutMode(true);
             showControls();
@@ -1386,6 +1443,15 @@ public class MainActivity extends AppCompatActivity {
         LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(0, -2, 1f);
         metaLp.setMargins(d(5), 0, 0, 0);
         metaRow.addView(c.nameLabel, metaLp);
+
+        // 「全屏 / 还原」放在信息行末尾，而不是塞进逐格控制条 ——
+        // 那排已经有 4 个键（−10 / ▶‖ / +10 / ↻），2 列排布下格子只有 ~178dp 宽，
+        // 再加一个必然挤爆。信息行本来就是"编号 + 文件名"的横向布局，末尾挂个小键正合适。
+        c.zoomButton = miniButton("全屏", v -> toggleZoom(index));
+        LinearLayout.LayoutParams zoomLp = new LinearLayout.LayoutParams(-2, -2);
+        zoomLp.setMargins(d(5), 0, 0, 0);
+        c.zoomButton.setLayoutParams(zoomLp);
+        metaRow.addView(c.zoomButton);
 
         // 底部叠层：编号/文件名 + 逐格控制条 + 进度条
         LinearLayout bottomOverlay = new LinearLayout(this);
@@ -1547,6 +1613,50 @@ public class MainActivity extends AppCompatActivity {
         showControls();
     }
 
+    // ---------------------------------------------------------- 放大为全屏
+
+    /**
+     * 把某一格放大到占满整个容器，或者从放大态还原。
+     *
+     * 放大时**其他几格是暂停、不是释放** —— 释放了再还原就得重新 prepare，
+     * 那是几秒的黑屏；暂停只花一帧，而且位置都还在。
+     * 还原时按放大前的播放状态把该起的起回来，不会把原本暂停的也一起放了。
+     */
+    private void toggleZoom(int index) {
+        if (zoomed >= 0) {
+            restoreFromZoom();
+            return;
+        }
+        Cell z = cells[index];
+        if (z == null || z.mp == null) return;
+
+        for (int i = 0; i < MAX_CELLS; i++) {
+            wasPlayingBeforeZoom[i] = mpIsPlaying(cells[i]);
+        }
+        zoomed = index;
+        focused = index;
+        for (int i = 0; i < MAX_CELLS; i++) {
+            if (i != index) mpPause(cells[i]);
+        }
+        applyLayoutMode(true);
+        applyAudio();
+        updateCellChrome();
+        showControls();
+    }
+
+    private void restoreFromZoom() {
+        int was = zoomed;
+        zoomed = -1;
+        applyLayoutMode(true);
+        for (int i = 0; i < MAX_CELLS; i++) {
+            if (i == was) continue;
+            if (wasPlayingBeforeZoom[i] && cells[i].mp != null) mpStart(cells[i]);
+        }
+        applyAudio();
+        updateCellChrome();
+        showControls();
+    }
+
     // ------------------------------------------------------------ 排布模式
 
     /**
@@ -1561,8 +1671,11 @@ public class MainActivity extends AppCompatActivity {
         boolean row = mode == Prefs.LAYOUT_ROW;
         boolean wide = wideScreen();
         boolean fill = prefs.fillScreen() && assignedCount > 0 && assignedCount < MAX_CELLS;
+        // 放大态优先于一切排布设置：某一格独占整个容器
+        boolean zoom = zoomed >= 0 && zoomed < MAX_CELLS;
 
-        String sig = mode + "/" + assignedCount + "/" + (wide ? 1 : 0) + "/" + (fill ? 1 : 0);
+        String sig = mode + "/" + assignedCount + "/" + (wide ? 1 : 0) + "/" + (fill ? 1 : 0)
+                + "/z" + zoomed;
         if (!force && sig.equals(appliedLayoutSig)) {
             syncQuickButtons();
             return;
@@ -1574,7 +1687,11 @@ public class MainActivity extends AppCompatActivity {
         // 少了直接触发 GridLayout 的计数校验异常。所以两边共用同一套分支判断。
         int cols;
         int rows;
-        if (!fill) {
+        if (zoom) {
+            // 放大态：1 列 1 行，只有那一格可见
+            cols = 1;
+            rows = 1;
+        } else if (!fill) {
             // 手动模式：格子数固定，空的就空着（显示占位「—」）
             cols = row ? MAX_CELLS : 2;
             rows = row ? 1 : 2;
@@ -1631,11 +1748,13 @@ public class MainActivity extends AppCompatActivity {
             int rw = 0;
             int rowSpan = 1;
 
-            boolean used = !fill || i < assignedCount;
+            boolean used = zoom ? (i == zoomed) : (!fill || i < assignedCount);
             cells[i].root.setVisibility(used ? View.VISIBLE : View.GONE);
 
             if (used) {
-                if (!fill) {
+                if (zoom) {
+                    // 独占 1×1，col/row 都取默认的 0 即可
+                } else if (!fill) {
                     if (row) {
                         col = i;
                     } else {
@@ -1715,7 +1834,13 @@ public class MainActivity extends AppCompatActivity {
         // （Android CDD 最高一档也只保证 3 路 1080p + 3 路 4K），
         // 4 路里混了 4K 很可能有格子起不来 —— 与其让它默默失败，不如先讲清楚。
         pool.execute(() -> {
-            for (Item it : want) probeMedia(it);
+            for (Item it : want) {
+                probeMedia(it);
+                // 探测结果只记日志，不再往弹窗里堆 —— 弹窗只留结论性提醒。
+                // 要查细节看格子的信息标签，或设置里的诊断页。
+                Log.i(TAG, "探测 " + it.name + "  " + it.videoW + "x" + it.videoH
+                        + "  " + decodeLine(it));
+            }
             ui.post(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 if (isRisky(want)) {
@@ -1729,6 +1854,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void enterPlayMode(int n) {
         for (Cell c : cells) c.reset();
+        zoomed = -1;                      // 新的一轮播放从正常排布开始
 
         assignedCount = n;
         for (int i = 0; i < n; i++) {
@@ -1915,24 +2041,22 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void confirmRiskyPlayback(List<Item> items) {
-        StringBuilder sb = new StringBuilder();
+        // 不再逐个列出视频信息 —— 起播前看那一长串文件名/分辨率/解码器没什么用，
+        // 只留结论性的文字提醒。要查细节可以看格子上的信息标签或诊断页。
         int n4k = 0;
-        for (int i = 0; i < items.size(); i++) {
-            Item it = items.get(i);
+        for (Item it : items) {
             if (is4k(it)) n4k++;
-            sb.append(i + 1).append(". ").append(it.name).append('\n')
-                    .append("     ").append(it.videoW).append("×").append(it.videoH)
-                    .append("   ").append(decodeLine(it)).append('\n');
         }
-        sb.append('\n');
+
+        StringBuilder sb = new StringBuilder();
         sb.append(n4k > 0
                 ? "选中的视频里有 " + n4k + " 个 4K。手机的 4K 解码器通常只能同时开 1～2 个；\n"
                 + "Android 兼容性定义里最高一档设备也只保证 3 路 1080p + 3 路 4K，\n"
-                + "所以 4 路里混了 4K 时很可能有格子起不来。"
-                : "选中的视频里有多个 2K 以上分辨率，并发解码压力较大。");
-        sb.append("\n起不来的那一格会显示错误码与分辨率。\n");
-        sb.append("\n注：解码器是按平台规则**预测**出来的（findDecoderForFormat），");
-        sb.append("MediaPlayer 最终用哪个并不对外开放，也无法强制指定硬解/软解。");
+                + "所以多路里混了 4K 时很可能有格子起不来。"
+                : "选中的视频里有多个 2K 以上分辨率，并发解码压力较大，\n"
+                + "可能有格子起不来。");
+        sb.append("\n\n起不来的那一格会显示分辨率与错误码，");
+        sb.append("届时可以一键降到 2 路，或者单独放大某一路来播。");
 
         // 「不再提醒」放在弹窗里，而不是只藏在设置页深处 ——
         // 用户第一次看到这个提醒时正是最想关掉它的时候。
@@ -1946,7 +2070,7 @@ public class MainActivity extends AppCompatActivity {
         TextView body = new TextView(this);
         body.setText(sb.toString());
         body.setTextSize(13);
-        body.setLineSpacing(0, 1.15f);
+        body.setLineSpacing(0, 1.2f);
 
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
@@ -1960,15 +2084,13 @@ public class MainActivity extends AppCompatActivity {
         new MaterialAlertDialogBuilder(this)
                 .setTitle("性能提醒")
                 .setView(sc)
-                .setPositiveButton("照常播放", (d, w) -> {
+                // 只留一个键。这是个说明性弹窗 —— 用户已经点了「开始播放」，
+                // 这里问的只是"知道可能有格子起不来吗"，给三个选项反而是负担。
+                // 想反悔直接返回键关掉即可。
+                .setPositiveButton("继续播放", (d, w) -> {
                     rememberNoRemind(neverAsk.isChecked());
                     enterPlayMode(items.size());
                 })
-                .setNeutralButton("只播前 2 路", (d, w) -> {
-                    rememberNoRemind(neverAsk.isChecked());
-                    enterPlayMode(Math.min(2, items.size()));
-                })
-                .setNegativeButton("取消", (d, w) -> rememberNoRemind(neverAsk.isChecked()))
                 .show();
     }
 
@@ -2014,6 +2136,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void exitPlayMode() {
         playing = false;
+        zoomed = -1;
         savePositions();                 // 必须在 reset() 之前 —— reset 会把 c.mp 置空
         for (Cell c : cells) c.reset();
         applyKeepScreenOn();
@@ -2196,6 +2319,9 @@ public class MainActivity extends AppCompatActivity {
                     ? View.VISIBLE : View.GONE);
             c.ctrlStrip.setVisibility(controlsVisible && (wideEnough || i == focused)
                     ? View.VISIBLE : View.GONE);
+            // 「全屏/还原」跟着控制条显隐走（它是个操作，不是信息，不受"信息常显"设置影响）
+            c.zoomButton.setVisibility(controlsVisible && hasVideo ? View.VISIBLE : View.GONE);
+            c.zoomButton.setText(zoomed == i ? "还原" : "全屏");
             c.toggleButton.setText(paused ? "▶" : "‖");
             c.stateIcon.setVisibility(paused && !controlsVisible ? View.VISIBLE : View.GONE);
 
