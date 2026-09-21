@@ -141,10 +141,12 @@ public class MainActivity extends AppCompatActivity {
     private boolean permAskedOnce;
     /** onCreate 时用的主题档位；onResume 发现设置变了就重建自己。 */
     private int themeModeAtCreate;
+    /** onCreate 时系统是不是深色。用于「跟随系统」时把系统变化也接住。 */
+    private boolean nightAtCreate;
 
     // ---- 选择页
     private FrameLayout root;
-    private LinearLayout introView;
+    private View introView;
     private TextView introPrimary;
     private TextView introStatus;
     private boolean introShowing;
@@ -324,6 +326,13 @@ public class MainActivity extends AppCompatActivity {
         CHIP_ON = p.chipOn;
         TEXT3 = p.textTertiary;
         themeModeAtCreate = prefs.themeMode();
+        nightAtCreate = isNightNow();
+    }
+
+    /** 系统当前是不是深色。 */
+    private boolean isNightNow() {
+        return (getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK)
+                == Configuration.UI_MODE_NIGHT_YES;
     }
 
     private boolean hasMediaPermission() {
@@ -340,7 +349,12 @@ public class MainActivity extends AppCompatActivity {
         super.onResume();
         // 用户可能刚在设置里改了明暗。manifest 里为了不打断播放而声明了 uiMode，
         // 系统不会自动重建 Activity —— 这里自己比对、自己重建一次。
-        if (prefs.themeMode() != themeModeAtCreate) {
+        //
+        // 顺带接住"系统自己切到深色"：那种情况同样不会重建，所以回到前台时补一次。
+        // 但**正在播放时不动** —— 那条 uiMode 声明本来就是为了别把视频打断。
+        boolean themePrefChanged = prefs.themeMode() != themeModeAtCreate;
+        boolean systemThemeChanged = !playing && isNightNow() != nightAtCreate;
+        if (themePrefChanged || systemThemeChanged) {
             recreate();
             return;
         }
@@ -650,7 +664,7 @@ public class MainActivity extends AppCompatActivity {
      * 上来就弹系统权限框、用户不知道要给什么的时候，拒绝率最高，
      * 拒了之后又没有补救指引，就卡死在空列表上。
      */
-    private LinearLayout buildIntroView() {
+    private View buildIntroView() {
         ScrollView sv = new ScrollView(this);
         sv.setBackgroundColor(BG);
 
@@ -755,7 +769,12 @@ public class MainActivity extends AppCompatActivity {
         });
         col.addView(recheck);
 
-        return col;
+        // 返回 sv，不是 col。
+        // col 已经被 sv.addView(col) 收编成子 View 了，它已经有父容器；
+        // 再拿它去 root.addView() 会直接抛
+        //   IllegalStateException: The specified child already has a parent.
+        // 而且是在 buildRoot() 里、Activity 还没显示出来就崩 —— 打开即闪退。
+        return sv;
     }
 
     private String permLabel() {
