@@ -15,6 +15,8 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecList;
+import android.media.MediaExtractor;
+import android.media.MediaFormat;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
 import android.net.Uri;
@@ -22,6 +24,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.ParcelFileDescriptor;
 import android.provider.MediaStore;
 import android.provider.Settings;
 import android.util.DisplayMetrics;
@@ -44,6 +47,10 @@ import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.VideoView;
 
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -62,7 +69,7 @@ import java.util.concurrent.Executors;
  * 血统：UI 骨架与交互思路来自一份 Tasker「Java 代码」动作里的 650 行内嵌脚本，
  * 本文件把它重写为正规 Activity，并按实际使用反馈逐步重做交互与设置。
  */
-public class MainActivity extends Activity {
+public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "VideoWall";
     private static final int MAX_CELLS = 4;
@@ -72,14 +79,36 @@ public class MainActivity extends Activity {
     private static final int THUMB_CACHE_LIMIT = 120;
     private static final long SEEK_STEP_MS = 10_000L;
 
-    private static final int BG = 0xFF0B0B0D;
-    private static final int CARD = 0xFF17171A;
-    private static final int STROKE = 0xFF2C2C31;
-    private static final int ACCENT = 0xFF5768EF;
-    private static final int WARN = 0xFFE24B4A;
-    private static final int MUTED = 0xFF9A9AA2;
-    /** 分组标题用的淡紫，和设置页保持一致。 */
-    private static final int SECTION_ACCENT = 0xFF7F77DD;
+    // 界面用色。
+    //
+    // 以前这些是 static final 常量（写死的暗色）。现在改成实例字段、在 onCreate 里
+    // 从当前主题解析 —— 名字保持不变，所以下面所有使用点都不用改。
+    // 想加新色值就加一个字段 + 在 applyPalette() 里赋一次。
+    private int BG;
+    private int CARD;
+    private int STROKE;
+    private int ACCENT;
+    private int WARN;
+    private int MUTED;
+    private int SECTION_ACCENT;
+    /** 正文主色（列表项标题等）。 */
+    private int TEXT_PRIMARY;
+    /** 中性胶囊底色（设置键、禁用态主按钮）。 */
+    private int CHIP;
+    /** 选中态胶囊底色（已选槽位、文件夹图标、选中行）。 */
+    private int CHIP_ON;
+    /** 占位/禁用文字。 */
+    private int TEXT3;
+
+    /**
+     * 播放页里那些压在**视频画面**上的元素（顶栏底衬、编号、文件名、逐格按钮）
+     * 一律保持深色半透明 —— 它们底下是不确定亮度的视频，
+     * 跟主题走反而会在亮色主题下糊成一片。这是有意为之，不是漏改。
+     */
+    private static final int OVER_VIDEO_SCRIM = 0xB3000000;
+    private static final int OVER_VIDEO_CHIP = 0x33FFFFFF;
+    private static final int OVER_VIDEO_LABEL = 0x99000000;
+    private static final int OVER_VIDEO_BTN = 0x8C000000;
 
     private float dp;
     private final Handler ui = new Handler(Looper.getMainLooper());
@@ -110,6 +139,8 @@ public class MainActivity extends Activity {
     private boolean libraryLoadStarted;
     /** 本次启动是否已经弹过一次系统权限框 —— 用来区分"还没问过"和"问过被拒了"。 */
     private boolean permAskedOnce;
+    /** onCreate 时用的主题档位；onResume 发现设置变了就重建自己。 */
+    private int themeModeAtCreate;
 
     // ---- 选择页
     private FrameLayout root;
@@ -165,6 +196,10 @@ public class MainActivity extends Activity {
         /** 起播前探测出的显示分辨率（已按旋转角修正）；未知为 0。 */
         int videoW;
         int videoH;
+        /** 起播前探测出的编码与平台会选用的解码器。 */
+        String videoMime = "";
+        String videoDecoder = "";
+        int videoDecoderMax;
 
         Item(long id, String name, String size, long durationMs, long dateAdded,
              long bucketId, String bucketName) {
@@ -261,6 +296,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         dp = getResources().getDisplayMetrics().density;
         prefs = new Prefs(this);
+        applyPalette();
         buildRoot();
 
         if (!prefs.onboarded()) {
@@ -273,10 +309,26 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 界面用色都在这里一次性从主题取出来。主题变了必须重建 Activity —— 已画好的 View 不会自己变色。 */
+    private void applyPalette() {
+        Palette p = Palette.of(this);
+        BG = p.bg;
+        CARD = p.card;
+        STROKE = p.stroke;
+        ACCENT = p.accent;
+        WARN = p.warn;
+        MUTED = p.textSecondary;
+        SECTION_ACCENT = p.section;
+        TEXT_PRIMARY = p.textPrimary;
+        CHIP = p.chip;
+        CHIP_ON = p.chipOn;
+        TEXT3 = p.textTertiary;
+        themeModeAtCreate = prefs.themeMode();
+    }
+
     private boolean hasMediaPermission() {
         return checkSelfPermission(mediaPermission()) == PackageManager.PERMISSION_GRANTED;
     }
-
     private String mediaPermission() {
         return Build.VERSION.SDK_INT >= 33
                 ? Manifest.permission.READ_MEDIA_VIDEO
@@ -286,6 +338,12 @@ public class MainActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        // 用户可能刚在设置里改了明暗。manifest 里为了不打断播放而声明了 uiMode，
+        // 系统不会自动重建 Activity —— 这里自己比对、自己重建一次。
+        if (prefs.themeMode() != themeModeAtCreate) {
+            recreate();
+            return;
+        }
         // 设置页里的「查看使用指引」把介绍页重新叫出来
         if (prefs.introRequested()) {
             prefs.setIntroRequested(false);
@@ -609,7 +667,7 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText("视频墙");
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(TEXT_PRIMARY);
         title.setTextSize(24);
         title.getPaint().setFakeBoldText(true);
         LinearLayout.LayoutParams tLp = new LinearLayout.LayoutParams(-2, -2);
@@ -746,7 +804,7 @@ public class MainActivity extends Activity {
         col.setPadding(d(11), 0, 0, 0);
         TextView t = new TextView(this);
         t.setText(title);
-        t.setTextColor(Color.WHITE);
+        t.setTextColor(TEXT_PRIMARY);
         t.setTextSize(14);
         TextView s = new TextView(this);
         s.setText(desc);
@@ -831,7 +889,7 @@ public class MainActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText("视频墙");
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(TEXT_PRIMARY);
         title.setTextSize(19);
         title.getPaint().setFakeBoldText(true);
         top.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -844,7 +902,7 @@ public class MainActivity extends Activity {
         col.addView(top);
 
         breadcrumb = new TextView(this);
-        breadcrumb.setTextColor(Color.WHITE);
+        breadcrumb.setTextColor(TEXT_PRIMARY);
         breadcrumb.setTextSize(14);
         breadcrumb.setPadding(d(14), d(4), d(14), d(10));
         breadcrumb.setVisibility(View.GONE);
@@ -869,7 +927,7 @@ public class MainActivity extends Activity {
 
         startButton = new TextView(this);
         startButton.setText("先选视频");
-        startButton.setTextColor(Color.WHITE);
+        startButton.setTextColor(TEXT3);
         startButton.setTextSize(16);
         startButton.setGravity(Gravity.CENTER);
         startButton.setPadding(0, d(15), 0, d(15));
@@ -890,12 +948,12 @@ public class MainActivity extends Activity {
             TextView slot = new TextView(this);
             slot.setText(has ? (i + 1) + ". " + picked.get(i).name : (i + 1) + ". 空");
             slot.setTextSize(11);
-            slot.setTextColor(has ? Color.WHITE : 0xFF6E6E76);
+            slot.setTextColor(has ? TEXT_PRIMARY : TEXT3);
             slot.setMaxLines(1);
             slot.setGravity(Gravity.CENTER_VERTICAL);
             slot.setPadding(d(8), d(9), d(8), d(9));
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(has ? 0xFF23233A : CARD);
+            bg.setColor(has ? CHIP_ON : CARD);
             bg.setCornerRadius(9 * dp);
             bg.setStroke(d(1), has ? ACCENT : STROKE);
             slot.setBackground(bg);
@@ -917,10 +975,10 @@ public class MainActivity extends Activity {
         pickCountText.setText("已选 " + n + "/" + MAX_CELLS);
 
         GradientDrawable sb = new GradientDrawable();
-        sb.setColor(n > 0 ? ACCENT : 0xFF26262B);
+        sb.setColor(n > 0 ? ACCENT : CHIP);
         sb.setCornerRadius(12 * dp);
         startButton.setBackground(sb);
-        startButton.setTextColor(n > 0 ? Color.WHITE : 0xFF6E6E76);
+        startButton.setTextColor(n > 0 ? Color.WHITE : TEXT3);
         startButton.setText(n > 0 ? ("开始播放 · " + n + " 路") : "先选视频");
     }
 
@@ -1013,7 +1071,7 @@ public class MainActivity extends Activity {
         icon.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(d(34), d(34));
         GradientDrawable ibg = new GradientDrawable();
-        ibg.setColor(0xFF23233A);
+        ibg.setColor(CHIP_ON);
         ibg.setCornerRadius(9 * dp);
         icon.setBackground(ibg);
         r.addView(icon, ilp);
@@ -1023,7 +1081,7 @@ public class MainActivity extends Activity {
         col.setPadding(d(12), 0, 0, 0);
         TextView n = new TextView(this);
         n.setText(f.name);
-        n.setTextColor(Color.WHITE);
+        n.setTextColor(TEXT_PRIMARY);
         n.setTextSize(14);
         n.setMaxLines(1);
         TextView c = new TextView(this);
@@ -1068,7 +1126,7 @@ public class MainActivity extends Activity {
         card(r);
         if (selected) {
             GradientDrawable bg = new GradientDrawable();
-            bg.setColor(0xFF23233A);
+            bg.setColor(CHIP_ON);
             bg.setCornerRadius(12 * dp);
             bg.setStroke(d(2), ACCENT);
             r.setBackground(bg);
@@ -1090,7 +1148,7 @@ public class MainActivity extends Activity {
         col.setPadding(d(10), 0, 0, 0);
         TextView n = new TextView(this);
         n.setText(it.name);
-        n.setTextColor(Color.WHITE);
+        n.setTextColor(TEXT_PRIMARY);
         n.setTextSize(13);
         n.setMaxLines(1);
         TextView m = new TextView(this);
@@ -1164,7 +1222,7 @@ public class MainActivity extends Activity {
         topBar = new LinearLayout(this);
         topBar.setOrientation(LinearLayout.HORIZONTAL);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
-        topBar.setBackgroundColor(0xB3000000);
+        topBar.setBackgroundColor(OVER_VIDEO_SCRIM);
         topBar.addView(pillFlat("‹ 返回", v -> exitPlayMode()));
 
         // 顶栏只留 5 个键：返回 · 暂停 · 播放 · 布局 · 音频。
@@ -1286,7 +1344,7 @@ public class MainActivity extends Activity {
         c.badge.setTextSize(10);
         c.badge.setPadding(d(6), d(1), d(6), d(1));
         GradientDrawable bb = new GradientDrawable();
-        bb.setColor(0x99000000);
+        bb.setColor(OVER_VIDEO_LABEL);
         bb.setCornerRadius(20 * dp);
         c.badge.setBackground(bb);
 
@@ -1297,7 +1355,7 @@ public class MainActivity extends Activity {
         c.nameLabel.setEllipsize(android.text.TextUtils.TruncateAt.END);
         c.nameLabel.setPadding(d(7), d(2), d(7), d(2));
         GradientDrawable nb = new GradientDrawable();
-        nb.setColor(0x99000000);
+        nb.setColor(OVER_VIDEO_LABEL);
         nb.setCornerRadius(20 * dp);
         c.nameLabel.setBackground(nb);
 
@@ -1638,7 +1696,7 @@ public class MainActivity extends Activity {
         // （Android CDD 最高一档也只保证 3 路 1080p + 3 路 4K），
         // 4 路里混了 4K 很可能有格子起不来 —— 与其让它默默失败，不如先讲清楚。
         pool.execute(() -> {
-            for (Item it : want) probeResolution(it);
+            for (Item it : want) probeMedia(it);
             ui.post(() -> {
                 if (isFinishing() || isDestroyed()) return;
                 if (isRisky(want)) {
@@ -1681,8 +1739,11 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------- 分辨率预检
 
-    /** 读一格的显示分辨率（已按旋转角修正宽高）。失败就留 0。 */
-    private void probeResolution(Item it) {
+    /**
+     * 读一格的显示分辨率（已按旋转角修正）以及平台会给它派哪个解码器。
+     * 失败就把字段留成默认值，不影响起播。
+     */
+    private void probeMedia(Item it) {
         MediaMetadataRetriever r = new MediaMetadataRetriever();
         try {
             r.setDataSource(this, it.uri());
@@ -1703,6 +1764,104 @@ public class MainActivity extends Activity {
             } catch (Throwable ignored) {
             }
         }
+
+        // 编码格式 + 平台会选哪个解码器。
+        // findDecoderForFormat() 走的是和 MediaPlayer 内部挑选同一套逻辑，
+        // 所以这里拿到的名字有参考价值 —— 但注意：MediaPlayer 最终用哪个并不对外开放，
+        // 只能说"按平台规则它应该选这个"，没法强制。
+        //
+        // MediaExtractor 没有 setDataSource(Context, Uri) 这个重载
+        // （那个是 MediaMetadataRetriever 的），只能自己开 fd 喂进去。
+        MediaExtractor ex = new MediaExtractor();
+        ParcelFileDescriptor pfd = null;
+        try {
+            pfd = getContentResolver().openFileDescriptor(it.uri(), "r");
+            if (pfd != null) {
+                ex.setDataSource(pfd.getFileDescriptor());
+                for (int i = 0; i < ex.getTrackCount(); i++) {
+                    MediaFormat f = ex.getTrackFormat(i);
+                    String mime = f.getString(MediaFormat.KEY_MIME);
+                    if (mime == null || !mime.startsWith("video/")) continue;
+                    it.videoMime = mime;
+                    try {
+                        MediaCodecList list = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+                        String name = list.findDecoderForFormat(f);
+                        it.videoDecoder = name == null ? "" : name;
+                        if (name != null) {
+                            for (MediaCodecInfo info : list.getCodecInfos()) {
+                                if (!info.getName().equals(name)) continue;
+                                it.videoDecoderMax =
+                                        info.getCapabilitiesForType(mime).getMaxSupportedInstances();
+                                break;
+                            }
+                        }
+                    } catch (Throwable ignored) {
+                    }
+                    break;
+                }
+            }
+        } catch (Throwable ignored) {
+        } finally {
+            try {
+                ex.release();
+            } catch (Throwable ignored) {
+            }
+            try {
+                if (pfd != null) pfd.close();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    /** 解码器是不是硬解（按命名惯例判断：OMX.google.* / c2.android.* 是软解）。 */
+    private static boolean isHardwareDecoder(String name) {
+        if (name == null || name.isEmpty()) return false;
+        return !(name.startsWith("OMX.google") || name.startsWith("c2.android"));
+    }
+
+    /** 给界面用的短编码名。 */
+    private static String shortCodec(String mime) {
+        if (mime == null) return "";
+        switch (mime) {
+            case "video/avc":
+                return "H.264";
+            case "video/hevc":
+                return "HEVC";
+            case "video/vp9":
+                return "VP9";
+            case "video/av01":
+                return "AV1";
+            case "video/mp4v-es":
+                return "MPEG-4";
+            case "video/x-vnd.on2.vp8":
+                return "VP8";
+            default:
+                return mime.startsWith("video/") ? mime.substring(6) : mime;
+        }
+    }
+
+    /** 一行式的解码器描述，供预检弹窗与日志用。 */
+    private static String decodeLine(Item it) {
+        if (it.videoDecoder.isEmpty()) return "解码器未知";
+        return shortCodec(it.videoMime)
+                + (isHardwareDecoder(it.videoDecoder) ? " 硬解" : " 软解")
+                + "  " + it.videoDecoder
+                + (it.videoDecoderMax > 0 ? "  max=" + it.videoDecoderMax : "");
+    }
+
+    /** 格子上的信息标签：文件名 + 分辨率 + 编码 + 硬解/软解。 */
+    private static String labelOf(Item it) {
+        StringBuilder sb = new StringBuilder(it.name);
+        if (it.videoW <= 0) return sb.toString();
+        sb.append("   ").append(it.videoW).append('×').append(it.videoH);
+        String codec = shortCodec(it.videoMime);
+        if (!codec.isEmpty()) {
+            sb.append("  ").append(codec);
+            if (!it.videoDecoder.isEmpty()) {
+                sb.append(isHardwareDecoder(it.videoDecoder) ? "·硬" : "·软");
+            }
+        }
+        return sb.toString();
     }
 
     private static int intOf(String s) {
@@ -1742,8 +1901,9 @@ public class MainActivity extends Activity {
         for (int i = 0; i < items.size(); i++) {
             Item it = items.get(i);
             if (is4k(it)) n4k++;
-            sb.append(i + 1).append(". ").append(it.name).append("  ")
-                    .append(it.videoW).append("×").append(it.videoH).append('\n');
+            sb.append(i + 1).append(". ").append(it.name).append('\n')
+                    .append("     ").append(it.videoW).append("×").append(it.videoH)
+                    .append("   ").append(decodeLine(it)).append('\n');
         }
         sb.append('\n');
         sb.append(n4k > 0
@@ -1751,7 +1911,9 @@ public class MainActivity extends Activity {
                 + "Android 兼容性定义里最高一档设备也只保证 3 路 1080p + 3 路 4K，\n"
                 + "所以 4 路里混了 4K 时很可能有格子起不来。"
                 : "选中的视频里有多个 2K 以上分辨率，并发解码压力较大。");
-        sb.append("\n起不来的那一格会显示错误码与分辨率。");
+        sb.append("\n起不来的那一格会显示错误码与分辨率。\n");
+        sb.append("\n注：解码器是按平台规则**预测**出来的（findDecoderForFormat），");
+        sb.append("MediaPlayer 最终用哪个并不对外开放，也无法强制指定硬解/软解。");
 
         // 「不再提醒」放在弹窗里，而不是只藏在设置页深处 ——
         // 用户第一次看到这个提醒时正是最想关掉它的时候。
@@ -1759,7 +1921,7 @@ public class MainActivity extends Activity {
         CheckBox neverAsk = new CheckBox(this);
         neverAsk.setText("不再提醒（可在设置里重新打开）");
         neverAsk.setTextSize(13);
-        neverAsk.setTextColor(0xFF888780);
+        neverAsk.setTextColor(MUTED);
         neverAsk.setPadding(d(4), d(6), d(4), 0);
 
         TextView body = new TextView(this);
@@ -1776,7 +1938,7 @@ public class MainActivity extends Activity {
         ScrollView sc = new ScrollView(this);
         sc.addView(box);
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("性能提醒")
                 .setView(sc)
                 .setPositiveButton("照常播放", (d, w) -> {
@@ -1811,7 +1973,7 @@ public class MainActivity extends Activity {
         String res = bad == null || bad.videoW <= 0
                 ? "" : "（" + bad.videoW + "×" + bad.videoH + "）";
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("有一路解码失败")
                 .setMessage("第 " + (cellIndex + 1) + " 格起不来" + res + "。\n"
                         + "现在还有 " + alive + " 路在播 —— 通常是把后两格的解码器让出去就能稳住。\n\n"
@@ -1847,9 +2009,7 @@ public class MainActivity extends Activity {
     private void assign(Cell c, Item it, int index) {
         c.name = it.name;
         c.badge.setText(String.valueOf(index + 1));
-        c.nameLabel.setText(it.videoW > 0
-                ? (it.name + "   " + it.videoW + "×" + it.videoH)
-                : it.name);
+        c.nameLabel.setText(labelOf(it));
         c.error.setVisibility(View.GONE);
         c.placeholder.setVisibility(View.GONE);
         c.sb.setProgress(0);
@@ -2035,7 +2195,7 @@ public class MainActivity extends Activity {
                 c.root.setBackground(bg);
 
                 GradientDrawable badgeBg = new GradientDrawable();
-                badgeBg.setColor(highlight ? ACCENT : 0x99000000);
+                badgeBg.setColor(highlight ? ACCENT : OVER_VIDEO_LABEL);
                 badgeBg.setCornerRadius(20 * dp);
                 c.badge.setBackground(badgeBg);
             }
@@ -2261,13 +2421,15 @@ public class MainActivity extends Activity {
         TextView tv = new TextView(activity);
         tv.setText(text);
         tv.setTextSize(12);
-        tv.setTextColor(Color.WHITE);
+        // 从主题取色 —— 之前写死 Color.WHITE，亮色主题下会白底白字看不见
+        tv.setTextColor(Palette.of(activity).textPrimary);
         tv.setTypeface(Typeface.MONOSPACE);
-        tv.setPadding(28, 12, 28, 12);
+        int pad = Math.round(20 * activity.getResources().getDisplayMetrics().density);
+        tv.setPadding(pad, pad / 2, pad, pad / 2);
         ScrollView sv = new ScrollView(activity);
         sv.addView(tv);
 
-        new AlertDialog.Builder(activity)
+        new MaterialAlertDialogBuilder(activity)
                 .setTitle("设备并发解码能力")
                 .setView(sv)
                 .setPositiveButton("关闭", null)
@@ -2358,15 +2520,16 @@ public class MainActivity extends Activity {
         v.setBackground(bg);
     }
 
+    /** 选择页用的中性胶囊（不压视频，跟着主题走）。 */
     private TextView pill(String text, View.OnClickListener l) {
         TextView b = new TextView(this);
         b.setText(text);
-        b.setTextColor(Color.WHITE);
+        b.setTextColor(TEXT_PRIMARY);
         b.setTextSize(12);
         b.setGravity(Gravity.CENTER);
         b.setPadding(d(12), d(7), d(12), d(7));
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xFF26262B);
+        bg.setColor(CHIP);
         bg.setCornerRadius(50 * dp);
         b.setBackground(bg);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
@@ -2386,7 +2549,7 @@ public class MainActivity extends Activity {
         b.setPadding(d(10), d(8), d(10), d(8));
         b.setSingleLine(true);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x33FFFFFF);
+        bg.setColor(OVER_VIDEO_CHIP);
         bg.setCornerRadius(50 * dp);
         b.setBackground(bg);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
@@ -2405,7 +2568,7 @@ public class MainActivity extends Activity {
         b.setMinWidth(d(42));
         b.setPadding(d(9), d(5), d(9), d(5));
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0x8C000000);
+        bg.setColor(OVER_VIDEO_BTN);
         bg.setCornerRadius(50 * dp);
         b.setBackground(bg);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);

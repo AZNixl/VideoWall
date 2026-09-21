@@ -14,8 +14,8 @@ android {
         applicationId = "com.aznixl.videowall"
         minSdk = 24
         targetSdk = 36
-        versionCode = 13
-        versionName = "2.2"
+        versionCode = 14
+        versionName = "2.3"
     }
 
     // 发布签名。
@@ -49,6 +49,10 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
+    buildFeatures {
+        buildConfig = false
+    }
+
     buildTypes {
         release {
             // 不开 R8：诊断页用反射读 Build.SOC_MODEL /
@@ -67,4 +71,11 @@ android {
             }
         }
     }
+}
+
+dependencies {
+    // Material 3（含 AppCompat 与明暗切换能力）。
+    // 这是本项目唯一的第三方依赖 —— 此前版本是零依赖，为了拿到
+    // Material 的组件样式、涟漪反馈与 DayNight 主题才引入。
+    implementation("com.google.android.material:material:1.14.0")
 }

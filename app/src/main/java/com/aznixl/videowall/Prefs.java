@@ -77,6 +77,23 @@ public final class Prefs {
         sp.edit().putBoolean("preflight", v).apply();
     }
 
+    // ---- 明暗主题
+
+    /** 跟随系统。 */
+    public static final int THEME_SYSTEM = 0;
+    /** 始终亮色。 */
+    public static final int THEME_LIGHT = 1;
+    /** 始终暗色。 */
+    public static final int THEME_DARK = 2;
+
+    public int themeMode() {
+        return sp.getInt("themeMode", THEME_SYSTEM);
+    }
+
+    public void setThemeMode(int v) {
+        sp.edit().putInt("themeMode", v).apply();
+    }
+
     // ---- 从哪儿开始播
 
     /** 每次都从头播。 */

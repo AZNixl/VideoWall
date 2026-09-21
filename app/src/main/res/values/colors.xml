@@ -1,4 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  两套主题色板。
+  亮色不是"把暗色反一转"—— 强调色调深了一档（#5768EF 在白底上偏飘、
+  对比度不够），文字也带一点蓝灰，避免纯黑纯白那种生硬感。
+-->
 <resources>
     <color name="ic_launcher_background">#141737</color>
+
+    <color name="vw_on_accent">#FFFFFFFF</color>
+
+    <!-- 亮色 -->
+    <color name="vw_bg_light">#F6F6F9</color>
+    <color name="vw_card_light">#FFFFFFFF</color>
+    <color name="vw_stroke_light">#E2E2E8</color>
+    <color name="vw_chip_light">#ECECF1</color>
+    <color name="vw_chip_on_light">#E7E9FE</color>
+    <color name="vw_text_light">#17171A</color>
+    <color name="vw_text2_light">#6E6E78</color>
+    <color name="vw_text3_light">#9C9CA6</color>
+    <color name="vw_accent_light">#4351D8</color>
+    <color name="vw_accent_container_light">#E7E9FE</color>
+    <color name="vw_warn_light">#C0392B</color>
+    <color name="vw_section_light">#5A4AC7</color>
+
+    <!-- 暗色（沿用旧版写死的那套，保证观感不变）-->
+    <color name="vw_bg_dark">#0B0B0D</color>
+    <color name="vw_card_dark">#17171A</color>
+    <color name="vw_stroke_dark">#2C2C31</color>
+    <color name="vw_chip_dark">#26262B</color>
+    <color name="vw_chip_on_dark">#23233A</color>
+    <color name="vw_text_dark">#FFFFFF</color>
+    <color name="vw_text2_dark">#9A9AA2</color>
+    <color name="vw_text3_dark">#6E6E76</color>
+    <color name="vw_accent_dark">#5768EF</color>
+    <color name="vw_accent_container_dark">#23233A</color>
+    <color name="vw_warn_dark">#E24B4A</color>
+    <color name="vw_section_dark">#7F77DD</color>
 </resources>

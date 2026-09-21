@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  亮色主题（默认）。
+  暗色在 values-night/themes.xml 里用同名 style 覆盖 —— 系统切到深色、
+  或用户在设置里选「暗色」，都会解析到那一份。
+-->
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <style name="Theme.VideoWall" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Material 自身的语义色，让 Material 组件（对话框、开关）跟着走 -->
+        <item name="colorPrimary">@color/vw_accent_light</item>
+        <item name="colorOnPrimary">@color/vw_on_accent</item>
+        <item name="colorPrimaryContainer">@color/vw_accent_container_light</item>
+        <item name="colorOnPrimaryContainer">@color/vw_accent_light</item>
+        <item name="colorSurface">@color/vw_card_light</item>
+        <item name="colorOnSurface">@color/vw_text_light</item>
+        <item name="colorSurfaceContainer">@color/vw_card_light</item>
+        <item name="colorSurfaceContainerHigh">@color/vw_card_light</item>
+        <item name="colorOnSurfaceVariant">@color/vw_text2_light</item>
+        <item name="colorOutline">@color/vw_stroke_light</item>
+        <item name="colorError">@color/vw_warn_light</item>
+        <item name="android:colorBackground">@color/vw_bg_light</item>
+        <item name="android:windowBackground">@color/vw_bg_light</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="m">true</item>
+
+        <!-- 应用自己的语义色 -->
+        <item name="vwBg">@color/vw_bg_light</item>
+        <item name="vwCard">@color/vw_card_light</item>
+        <item name="vwStroke">@color/vw_stroke_light</item>
+        <item name="vwChip">@color/vw_chip_light</item>
+        <item name="vwChipOn">@color/vw_chip_on_light</item>
+        <item name="vwTextPrimary">@color/vw_text_light</item>
+        <item name="vwTextSecondary">@color/vw_text2_light</item>
+        <item name="vwTextTertiary">@color/vw_text3_light</item>
+        <item name="vwAccent">@color/vw_accent_light</item>
+        <item name="vwWarn">@color/vw_warn_light</item>
+        <item name="vwSection">@color/vw_section_light</item>
+    </style>
+
+</resources>

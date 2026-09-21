@@ -20,9 +20,14 @@ import android.view.WindowInsets;
 import android.widget.CompoundButton;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import androidx.appcompat.app.AppCompatDelegate;
+import androidx.appcompat.app.AppCompatActivity;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+import com.google.android.material.materialswitch.MaterialSwitch;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -38,14 +43,16 @@ import java.util.concurrent.Executors;
  * 开关项（Switch）、可选项（点击弹单选）、跳转项（点击执行动作），
  * 再用分组标题把条目切成几块，避免一长条平铺。
  */
-public class SettingsActivity extends Activity {
+public class SettingsActivity extends AppCompatActivity {
 
-    private static final int BG = 0xFF0B0B0D;
-    private static final int CARD = 0xFF17171A;
-    private static final int STROKE = 0xFF2C2C31;
-    private static final int MUTED = 0xFF9A9AA2;
-    private static final int SECTION = 0xFF7F77DD;
-    private static final int VALUE = 0xFF9FE1CB;
+    // 界面用色：改成实例字段，在 onCreate 里从主题解析（与 MainActivity 同一套做法）
+    private int BG;
+    private int CARD;
+    private int STROKE;
+    private int MUTED;
+    private int SECTION;
+    private int VALUE;
+    private int TEXT_PRIMARY;
 
     /** 作者与项目地址 —— 关于页与「项目主页」共用。 */
     private static final String AUTHOR = "AZNixl";
@@ -60,6 +67,8 @@ public class SettingsActivity extends Activity {
 
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService pool = Executors.newSingleThreadExecutor();
+    /** onCreate 时用的主题档位；onResume 发现变了就重建自己。 */
+    private int themeModeAtCreate;
 
     private interface OnBool {
         void apply(boolean v);
@@ -74,7 +83,30 @@ public class SettingsActivity extends Activity {
         super.onCreate(savedInstanceState);
         dp = getResources().getDisplayMetrics().density;
         prefs = new Prefs(this);
+        applyPalette();
         setContentView(buildUi());
+    }
+
+    /** 从当前主题取一套颜色。主题变了要重建 Activity —— 已画好的 View 不会自己变色。 */
+    private void applyPalette() {
+        Palette p = Palette.of(this);
+        BG = p.bg;
+        CARD = p.card;
+        STROKE = p.stroke;
+        MUTED = p.textSecondary;
+        SECTION = p.section;
+        VALUE = p.accent;
+        TEXT_PRIMARY = p.textPrimary;
+        themeModeAtCreate = prefs.themeMode();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // 主题是在这一页改的；manifest 里声明了 uiMode，系统不会自动重建，所以自己来
+        if (prefs.themeMode() != themeModeAtCreate) {
+            recreate();
+        }
     }
 
     @Override
@@ -119,7 +151,7 @@ public class SettingsActivity extends Activity {
 
         TextView back = new TextView(this);
         back.setText("‹  返回");
-        back.setTextColor(Color.WHITE);
+        back.setTextColor(TEXT_PRIMARY);
         back.setTextSize(14);
         back.setPadding(d(6), d(6), d(16), d(6));
         back.setOnClickListener(v -> finish());
@@ -127,7 +159,7 @@ public class SettingsActivity extends Activity {
 
         TextView title = new TextView(this);
         title.setText("设置");
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(TEXT_PRIMARY);
         title.setTextSize(18);
         title.getPaint().setFakeBoldText(true);
         top.addView(title, new LinearLayout.LayoutParams(0, -2, 1f));
@@ -158,6 +190,20 @@ public class SettingsActivity extends Activity {
     // ------------------------------------------------------------- 条目清单
 
     private void buildItems() {
+        section("外观");
+
+        choice("主题", "暗色是原来的样子；亮色更适合白天和强光下",
+                new String[]{"跟随系统", "亮色", "暗色"},
+                prefs.themeMode(),
+                v -> {
+                    prefs.setThemeMode(v);
+                    AppCompatDelegate.setDefaultNightMode(App.nightModeOf(v));
+                    // 延到下一轮再重建：此刻单选框还没 dismiss，直接重建会让对话框挂在已销毁的 Activity 上。
+                    // 之所以要手动重建，是因为 manifest 里为了不打断播放而声明了 uiMode，
+                    // AppCompat 就不会自己重建了。
+                    ui.post(this::recreate);
+                });
+
         section("排布与显示");
 
         choice("排布模式", "手动选择，不随系统横竖屏自动切换",
@@ -265,7 +311,7 @@ public class SettingsActivity extends Activity {
     }
 
     private void showAbout() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("关于视频墙")
                 .setMessage(
                         "至多 4 路视频同时铺满屏幕播放的本地播放器。\n\n"
@@ -273,7 +319,7 @@ public class SettingsActivity extends Activity {
                                 + "项目　　" + PROJECT_URL_SHORT + "\n"
                                 + "包名　　" + getPackageName() + "\n"
                                 + "版本　　" + versionLine() + "\n"
-                                + "构建　　单 Activity + Java，零第三方依赖\n"
+                                + "构建　　单 Activity + Java；第三方依赖只有 Material Components\n"
                                 + "平台　　minSdk 24 / targetSdk 36\n\n"
                                 + "只为本地文件设计：不联网、不申请网络权限、不采集任何数据，\n"
                                 + "所有处理都在本机完成。\n\n"
@@ -284,11 +330,16 @@ public class SettingsActivity extends Activity {
     }
 
     private void showLicenses() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("开源许可与致谢")
                 .setMessage(
                         "【第三方依赖】\n"
-                                + "本应用不含任何第三方库，全部代码只使用 Android 平台 API 与 Java 标准库：\n\n"
+                                + "本应用只依赖一个第三方库：\n\n"
+                                + "· Material Components for Android\n"
+                                + "　com.google.android.material:material 1.14.0\n"
+                                + "　Apache License 2.0 —— 提供 Material 3 主题、组件样式、\n"
+                                + "　点击涟漪反馈，以及明暗两套配色（DayNight）的切换能力。\n\n"
+                                + "其余全部使用 Android 平台 API 与 Java 标准库：\n"
                                 + "· 视频解码与渲染　android.media.MediaPlayer / android.widget.VideoView\n"
                                 + "· 媒体库读取　　　android.provider.MediaStore\n"
                                 + "· 偏好存储　　　　android.content.SharedPreferences\n"
@@ -415,7 +466,7 @@ public class SettingsActivity extends Activity {
         final boolean[] checked = new boolean[ids.size()];
         for (int i = 0; i < ids.size(); i++) checked[i] = current.containsKey(ids.get(i));
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("勾选的文件夹不出现在首页")
                 .setMultiChoiceItems(names.toArray(new String[0]), checked,
                         (dialog, which, isChecked) -> checked[which] = isChecked)
@@ -483,7 +534,7 @@ public class SettingsActivity extends Activity {
         col.setOrientation(LinearLayout.VERTICAL);
         TextView t = new TextView(this);
         t.setText(title);
-        t.setTextColor(Color.WHITE);
+        t.setTextColor(TEXT_PRIMARY);
         t.setTextSize(14);
         col.addView(t);
         if (desc != null && !desc.isEmpty()) {
@@ -501,9 +552,8 @@ public class SettingsActivity extends Activity {
 
     private void switchItem(String title, String desc, boolean value, OnBool onChange) {
         LinearLayout r = row(title, desc);
-        Switch sw = new Switch(this);
+        MaterialSwitch sw = new MaterialSwitch(this);
         sw.setChecked(value);
-        sw.setShowText(false);
         sw.setOnCheckedChangeListener((CompoundButton b, boolean checked) -> onChange.apply(checked));
         r.addView(sw);
         r.setOnClickListener(v -> sw.setChecked(!sw.isChecked()));
@@ -523,7 +573,7 @@ public class SettingsActivity extends Activity {
         arrow.setTextSize(15);
         r.addView(arrow);
 
-        r.setOnClickListener(view -> new AlertDialog.Builder(this)
+        r.setOnClickListener(view -> new MaterialAlertDialogBuilder(this)
                 .setTitle(title)
                 .setSingleChoiceItems(options, index, (dialog, which) -> {
                     onChange.apply(which);

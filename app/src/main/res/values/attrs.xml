@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  自定义主题属性。
+
+  界面全部是代码里手工搭的（没有布局 XML），颜色不能写死成常量 ——
+  否则明暗主题切换无从谈起。这里把用到的每个颜色都提成主题属性，
+  由 values/themes.xml（亮色）和 values-night/themes.xml（暗色）分别赋值，
+  代码里统一通过 Palette 从当前主题解析。
+-->
+<resources>
+    <!-- 页面底色 -->
+    <attr name="vwBg" format="color" />
+    <!-- 卡片/列表项底色 -->
+    <attr name="vwCard" format="color" />
+    <!-- 卡片描边 -->
+    <attr name="vwStroke" format="color" />
+    <!-- 中性药丸/胶囊底色（设置按钮等） -->
+    <attr name="vwChip" format="color" />
+    <!-- 被选中/高亮项的底色（已选槽位、文件夹图标底） -->
+    <attr name="vwChipOn" format="color" />
+    <!-- 正文主色 -->
+    <attr name="vwTextPrimary" format="color" />
+    <!-- 次要说明文字 -->
+    <attr name="vwTextSecondary" format="color" />
+    <!-- 占位/禁用文字 -->
+    <attr name="vwTextTertiary" format="color" />
+    <!-- 强调色（选中描边、主按钮、编号） -->
+    <attr name="vwAccent" format="color" />
+    <!-- 警告/错误 -->
+    <attr name="vwWarn" format="color" />
+    <!-- 分组标题 -->
+    <attr name="vwSection" format="color" />
+</resources>

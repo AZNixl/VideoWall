@@ -11,24 +11,28 @@
         android:required="false" />
 
     <application
+        android:name=".App"
         android:allowBackup="false"
         android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
-        android:theme="@android:style/Theme.Material.NoActionBar">
+        android:theme="@style/Theme.VideoWall">
 
         <!--
           configChanges 里带上 orientation/screenSize/density：
           旋转时 Activity 不重建，正在播的 4 路不会被打断重来。
           排布模式由设置决定，不随横竖屏自动切换。
+
+          同时保留 uiMode：系统到点自动切深色时也不重建，免得把正在播的视频打断。
+          代价是用户手动改主题后需要 App 自己 recreate() —— 见 App 与 MainActivity 的注释。
         -->
         <activity
             android:name=".MainActivity"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density"
             android:exported="true"
-            android:theme="@android:style/Theme.Material.NoActionBar">
+            android:theme="@style/Theme.VideoWall">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -40,6 +44,6 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|uiMode|density"
             android:exported="false"
             android:label="@string/settings_title"
-            android:theme="@android:style/Theme.Material.NoActionBar" />
+            android:theme="@style/Theme.VideoWall" />
     </application>
 </manifest>
