@@ -270,8 +270,11 @@ public class MainActivity extends AppCompatActivity {
         TextView nameLabel;
         LinearLayout ctrlStrip;
         LinearLayout bottomOverlay;
-        TextView toggleButton;
-        /** 「全屏 / 还原」键。逐格控制条的第四个键，用矢量图标而不是文字。 */
+        /** 逐格控制条的播放/暂停键（图标）。 */
+        ImageView toggleButton;
+        /** 上一帧这个键画的是不是"暂停"图标，避免每 400ms 无脑重设。 */
+        boolean toggleShowsPause;
+        /** 「全屏 / 还原」键（图标）。 */
         ImageView zoomButton;
         boolean userSeeking;
         boolean highlighted;
@@ -1001,10 +1004,20 @@ public class MainActivity extends AppCompatActivity {
     /** 刷新选择页顶栏两个切换键的图标（都表示"当前是什么"）。 */
     private void syncTopButtons() {
         if (themeButton != null) {
-            boolean dark = (getResources().getConfiguration().uiMode
-                    & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
-                    == android.content.res.Configuration.UI_MODE_NIGHT_YES;
-            themeButton.setImageResource(dark ? R.drawable.ic_dark_mode : R.drawable.ic_light_mode);
+            // 三档三个图标：太阳 / 月亮 / A（Auto，跟随系统）
+            int res;
+            switch (prefs.themeMode()) {
+                case Prefs.THEME_LIGHT:
+                    res = R.drawable.ic_light_mode;
+                    break;
+                case Prefs.THEME_DARK:
+                    res = R.drawable.ic_dark_mode;
+                    break;
+                default:
+                    res = R.drawable.ic_theme_auto;
+                    break;
+            }
+            themeButton.setImageResource(res);
         }
         if (layoutToggleButton != null) {
             layoutToggleButton.setImageResource(prefs.folderGrid()
@@ -1033,7 +1046,7 @@ public class MainActivity extends AppCompatActivity {
 
         // 顶栏三个操作键，全用图标：主题切换、文件夹排布切换、设置。
         // 纯文字按钮在标题旁边显得散，图标紧凑也更容易一眼认出来。
-        themeButton = pillIcon(R.drawable.ic_light_mode, v -> toggleTheme());
+        themeButton = pillIcon(R.drawable.ic_theme_auto, v -> toggleTheme());
         top.addView(themeButton);
 
         layoutToggleButton = pillIcon(R.drawable.ic_view_list, v -> toggleFolderGrid());
@@ -1415,7 +1428,11 @@ public class MainActivity extends AppCompatActivity {
         m.setTextSize(11);
         v.addView(m, new LinearLayout.LayoutParams(-1, -2));
 
-        v.setOnClickListener(x -> togglePick(it));
+        v.setOnClickListener(x -> {
+            togglePick(it);
+            // 只刷新这一张卡，不重建列表
+            applyCardSelection(v, check, picked.contains(it));
+        });
         return v;
     }
 
@@ -1476,10 +1493,22 @@ public class MainActivity extends AppCompatActivity {
         cLp.setMargins(d(8), 0, 0, 0);
         r.addView(check, cLp);
 
-        r.setOnClickListener(v -> togglePick(it));
+        r.setOnClickListener(v -> {
+            togglePick(it);
+            // 只刷新这一行，不重建列表
+            applyRowSelection(r, check, picked.contains(it));
+        });
         return r;
     }
 
+    /**
+     * 勾选 / 取消一个视频。
+     *
+     * 注意这里**不整表重建**：只刷新被点那一项的外观 + 底部槽位。
+     * 原来的实现每次勾选都走 refreshPickUi() → removeAllViews() 把整个列表重建，
+     * 每个缩略图还要重新 setImageBitmap一遍 —— 视频一多就卡，
+     * 表现就是"点选不灵敏"，连点还会丢事件。
+     */
     private void togglePick(Item it) {
         if (picked.contains(it)) {
             picked.remove(it);
@@ -1491,7 +1520,44 @@ public class MainActivity extends AppCompatActivity {
             picked.add(it);
         }
         savePick();
-        refreshPickUi();
+        renderSlots();
+    }
+
+    /** 列表行的选中外观（同步刷新，不重建视图）。 */
+    private void applyRowSelection(View row, TextView check, boolean selected) {
+        if (selected) {
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(CHIP_ON);
+            bg.setCornerRadius(12 * dp);
+            bg.setStroke(d(2), ACCENT);
+            row.setBackground(bg);
+        } else {
+            card(row);
+        }
+        check.setText(selected ? "✓" : "");
+        GradientDrawable cb = new GradientDrawable();
+        cb.setColor(selected ? ACCENT : 0x00000000);
+        cb.setShape(GradientDrawable.OVAL);
+        cb.setStroke(d(1), selected ? ACCENT : STROKE);
+        check.setBackground(cb);
+    }
+
+    /** 网格卡片的选中外观。 */
+    private void applyCardSelection(View cardView, TextView check, boolean selected) {
+        if (selected) {
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(CHIP_ON);
+            bg.setCornerRadius(12 * dp);
+            bg.setStroke(d(2), ACCENT);
+            cardView.setBackground(bg);
+        } else {
+            card(cardView);
+        }
+        check.setText(selected ? "✓" : "");
+        GradientDrawable cb = new GradientDrawable();
+        cb.setColor(selected ? ACCENT : 0x66000000);
+        cb.setShape(GradientDrawable.OVAL);
+        check.setBackground(cb);
     }
 
     private void savePick() {
@@ -1682,12 +1748,13 @@ public class MainActivity extends AppCompatActivity {
         c.ctrlStrip.setPadding(0, 0, 0, d(2));
 
         final int fixIdx = index;
-        // 顺序固定：−10s ｜ ▶/‖ ｜ +10s ｜ 全屏。
-        // 重播键（↻）已按需求去掉。
-        c.ctrlStrip.addView(miniButton("−10", v -> seekBy(fixIdx, -SEEK_STEP_MS)));
-        c.toggleButton = miniButton("▶", v -> toggleCell(fixIdx));
+        // 顺序固定：后退 ｜ 播放/暂停 ｜ 前进 ｜ 全屏。全用图标。
+        c.ctrlStrip.addView(miniIconButton(R.drawable.ic_rewind10,
+                v -> seekBy(fixIdx, -SEEK_STEP_MS)));
+        c.toggleButton = miniIconButton(R.drawable.ic_play, v -> toggleCell(fixIdx));
         c.ctrlStrip.addView(c.toggleButton);
-        c.ctrlStrip.addView(miniButton("+10", v -> seekBy(fixIdx, SEEK_STEP_MS)));
+        c.ctrlStrip.addView(miniIconButton(R.drawable.ic_forward10,
+                v -> seekBy(fixIdx, SEEK_STEP_MS)));
         c.zoomButton = miniIconButton(R.drawable.ic_fullscreen, v -> toggleZoom(fixIdx));
         c.ctrlStrip.addView(c.zoomButton);
         bottomOverlay.addView(c.ctrlStrip);
@@ -2526,7 +2593,13 @@ public class MainActivity extends AppCompatActivity {
             c.zoomButton.setVisibility(controlsVisible && hasVideo ? View.VISIBLE : View.GONE);
             c.zoomButton.setImageResource(zoomed == i
                     ? R.drawable.ic_fullscreen_exit : R.drawable.ic_fullscreen);
-            c.toggleButton.setText(paused ? "▶" : "‖");
+            // 图标表示"点它会做什么"：在播就显示暂停
+            boolean showPause = !paused;
+            if (showPause != c.toggleShowsPause) {
+                c.toggleShowsPause = showPause;
+                c.toggleButton.setImageResource(showPause
+                        ? R.drawable.ic_pause : R.drawable.ic_play);
+            }
             c.stateIcon.setVisibility(paused && !controlsVisible ? View.VISIBLE : View.GONE);
 
             // 选中格的高亮：描边 + 编号底色变强调色。
@@ -2881,26 +2954,7 @@ public class MainActivity extends AppCompatActivity {
         v.setBackground(bg);
     }
 
-    /** 选择页用的中性胶囊（不压视频，跟着主题走）。 */
-    private TextView pill(String text, View.OnClickListener l) {
-        TextView b = new TextView(this);
-        b.setText(text);
-        b.setTextColor(TEXT_PRIMARY);
-        b.setTextSize(12);
-        b.setGravity(Gravity.CENTER);
-        b.setPadding(d(12), d(7), d(12), d(7));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(CHIP);
-        bg.setCornerRadius(50 * dp);
-        b.setBackground(bg);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-        lp.setMargins(d(6), 0, 0, 0);
-        b.setLayoutParams(lp);
-        b.setOnClickListener(l);
-        return b;
-    }
-
-    /** 选择页顶栏的图标键：和 [pill] 同一套配色与尺寸，只是内容换成矢量图标。 */
+    /** 选择页顶栏的图标键：中性胶囊底色（不压视频，跟着主题走）。 */
     private ImageView pillIcon(int drawableRes, View.OnClickListener l) {
         ImageView iv = new ImageView(this);
         iv.setImageResource(drawableRes);
@@ -2940,27 +2994,12 @@ public class MainActivity extends AppCompatActivity {
         return iv;
     }
 
-    private TextView miniButton(String text, View.OnClickListener l) {
-        TextView b = new TextView(this);
-        b.setText(text);
-        b.setTextColor(Color.WHITE);
-        b.setTextSize(12);
-        b.setGravity(Gravity.CENTER);
-        b.setSingleLine(true);
-        b.setMinWidth(d(36));
-        b.setPadding(d(6), d(5), d(6), d(5));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(OVER_VIDEO_BTN);
-        bg.setCornerRadius(50 * dp);
-        b.setBackground(bg);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-        lp.setMargins(d(2), 0, d(2), 0);
-        b.setLayoutParams(lp);
-        b.setOnClickListener(l);
-        return b;
-    }
-
-    /** 逐格控制条上的图标键，尺寸与 [miniButton] 对齐。 */
+    /**
+     * 逐格控制条上的图标键。
+     *
+     * 尺寸压得小：2×2 在 360dp 竖屏下每格只有约 178dp 宽，这一排要放 4 个键，
+     * 每个连同间距不能超过 44dp。压视频上，所以用深色半透明底、不跟主题走。
+     */
     private ImageView miniIconButton(int drawableRes, View.OnClickListener l) {
         ImageView iv = new ImageView(this);
         iv.setImageResource(drawableRes);
