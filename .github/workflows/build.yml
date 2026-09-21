@@ -21,8 +21,26 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # 不要用 android-actions/setup-android@v3。
+      # 它内部会跑 `sdkmanager tools`，而 "tools" 这个包在现代 SDK 仓库里已经不存在，
+      # sdkmanager 直接以 exit 1 退出，导致整个 job 在装 SDK 这步就挂掉
+      # （报 "Failed to find package 'tools'"）。2026-09 实测如此。
+      #
+      # ubuntu-latest 镜像本来就预装了 Android SDK（ANDROID_HOME=/usr/local/lib/android/sdk），
+      # 这里只补上本项目需要的 platform 与 build-tools；装不上也不失败，
+      # AGP 自己还有 sdkDownload 兜底。
+      - name: Ensure Android SDK components
+        run: |
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          SDKMGR="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | tail -1 || true)"
+          echo "sdkmanager=$SDKMGR"
+          if [ -n "$SDKMGR" ]; then
+            yes | "$SDKMGR" --licenses > /dev/null 2>&1 || true
+            "$SDKMGR" "platform-tools" "platforms;android-36" "build-tools;36.0.0" || true
+          fi
+          echo "--- platforms ---"; ls "$ANDROID_HOME/platforms" 2>/dev/null || true
+          echo "--- build-tools ---"; ls "$ANDROID_HOME/build-tools" 2>/dev/null || true
 
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
@@ -31,7 +49,7 @@ jobs:
       # 没配 secrets 也不失败 —— app/build.gradle.kts 在找不到 keystore.properties 时
       # 会让 release 退回 debug 签名，CI 照样能出可安装的包。
       #
-      # 需要配置的 secrets：KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
+      # 需要的 secrets：KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
       #   KEYSTORE_BASE64 的生成方式见 README「发布签名」一节。
       - name: Restore release keystore
         env:
@@ -57,7 +75,7 @@ jobs:
         run: |
           APK=app/build/outputs/apk/release/app-release.apk
           if [ -f "$APK" ]; then
-            BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+            BT=$(ls -d "${ANDROID_HOME:-/usr/local/lib/android/sdk}"/build-tools/* 2>/dev/null | sort -V | tail -1)
             "$BT/apksigner" verify --print-certs "$APK" || true
           fi
 

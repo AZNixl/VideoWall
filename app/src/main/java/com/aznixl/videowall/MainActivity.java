@@ -359,6 +359,33 @@ public class MainActivity extends Activity {
         for (Cell c : cells) {
             if (mpIsPlaying(c)) mpPause(c);
         }
+        savePositions();                 // 切出去时把进度记下，回来能续播
+    }
+
+    /**
+     * 记下每一路当前播放到哪，供「继续播放」下次接着放。
+     *
+     * 写入与读取（assign 的 onPrepared）共用同一套判据：
+     *   · 位置 < 2 秒 —— 没什么可续的，删掉记录，下次从头
+     *   · 位置 > 时长 − 3 秒 —— 视作已看完，删掉记录，下次从头
+     * 显式 remove 而不是跳过，避免旧记录一直躺在偏好里让用户困惑。
+     */
+    private void savePositions() {
+        if (prefs.startMode() != Prefs.START_RESUME) return;
+        LinkedHashMap<Long, Long> map = Prefs.parseNumbers(prefs.resumePositions());
+        for (int i = 0; i < MAX_CELLS && i < picked.size(); i++) {
+            Cell c = cells[i];
+            if (c == null || c.mp == null) continue;
+            long id = picked.get(i).id;
+            int pos = mpPosition(c);
+            int dur = mpDuration(c);
+            if (pos < 2000 || (dur > 0 && pos > dur - 3000)) {
+                map.remove(id);
+                continue;
+            }
+            map.put(id, (long) pos);
+        }
+        prefs.setResumePositions(Prefs.formatNumbers(map));
     }
 
     @Override
@@ -1806,6 +1833,7 @@ public class MainActivity extends Activity {
 
     private void exitPlayMode() {
         playing = false;
+        savePositions();                 // 必须在 reset() 之前 —— reset 会把 c.mp 置空
         for (Cell c : cells) c.reset();
         applyKeepScreenOn();
         applyImmersive(false);
@@ -1845,6 +1873,19 @@ public class MainActivity extends Activity {
             c.mp = mp;
             c.sb.setMax(Math.max(1, mpDuration(c)));
             mpSetLooping(c, prefs.loopEach());
+
+            // 「继续播放」：把这一路拉回上次看到的位置。
+            // 判据和写入端一致 —— 太靠近结尾就当作已看完，从头开始。
+            if (prefs.startMode() == Prefs.START_RESUME) {
+                Long saved = Prefs.parseNumbers(prefs.resumePositions()).get(it.id);
+                int dur = mpDuration(c);
+                if (saved != null && saved > 2000 && (dur <= 0 || saved < dur - 3000)) {
+                    mpSeekTo(c, saved.intValue());
+                    c.sb.setProgress(saved.intValue());
+                    Log.i(TAG, "cell " + index + " 续播 @" + saved);
+                }
+            }
+
             applyAudio();
             if (prefs.autoPlay()) mpStart(c);
             updateCellChrome();

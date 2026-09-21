@@ -194,6 +194,18 @@ public class SettingsActivity extends Activity {
 
         section("播放行为");
 
+        choice("开始播放时", "「继续播放」会记住每路看到哪儿，下次接着放",
+                new String[]{"从头播放", "继续播放"},
+                prefs.startMode(),
+                prefs::setStartMode);
+
+        action("清除已记住的播放进度", "清掉之后，所有视频都会从头开始播放",
+                () -> {
+                    prefs.setResumePositions("");
+                    toast("已清除记下的播放进度");
+                    rebuildItems();
+                });
+
         switchItem("开始播放时自动起播", null,
                 prefs.autoPlay(), prefs::setAutoPlay);
 

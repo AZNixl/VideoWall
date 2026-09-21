@@ -77,6 +77,59 @@ public final class Prefs {
         sp.edit().putBoolean("preflight", v).apply();
     }
 
+    // ---- 从哪儿开始播
+
+    /** 每次都从头播。 */
+    public static final int START_FRESH = 0;
+    /** 接着上次看到的位置播（按视频 id 记住每路的位置）。 */
+    public static final int START_RESUME = 1;
+
+    public int startMode() {
+        return sp.getInt("startMode", START_FRESH);
+    }
+
+    public void setStartMode(int v) {
+        sp.edit().putInt("startMode", v).apply();
+    }
+
+    // 播放进度表："mediaId\tpositionMs" 多行。
+    // 只记"看到一半"的：看到尾巴 3 秒内、或开头 2 秒内的都不记，
+    // 这样下次要么从头、要么接着看，不会停在"刚播完"的尴尬位置。
+
+    public String resumePositions() {
+        return sp.getString("resumePositions", "");
+    }
+
+    public void setResumePositions(String v) {
+        sp.edit().putString("resumePositions", v).apply();
+    }
+
+    /** 解析 "id\t数值" 多行文本；非法行跳过。 */
+    public static LinkedHashMap<Long, Long> parseNumbers(String raw) {
+        LinkedHashMap<Long, Long> out = new LinkedHashMap<>();
+        if (raw == null || raw.isEmpty()) return out;
+        for (String line : raw.split("\n")) {
+            if (line.isEmpty()) continue;
+            int tab = line.indexOf('\t');
+            if (tab <= 0) continue;
+            try {
+                out.put(Long.parseLong(line.substring(0, tab)),
+                        Long.parseLong(line.substring(tab + 1)));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return out;
+    }
+
+    public static String formatNumbers(Map<Long, Long> map) {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<Long, Long> e : map.entrySet()) {
+            if (sb.length() > 0) sb.append('\n');
+            sb.append(e.getKey()).append('\t').append(e.getValue());
+        }
+        return sb.toString();
+    }
+
     // ---- 首次启动的介绍页
 
     /** 是否已经看过启动介绍页并完成授权。 */
