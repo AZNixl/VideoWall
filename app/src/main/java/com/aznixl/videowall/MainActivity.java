@@ -261,6 +261,8 @@ public class MainActivity extends AppCompatActivity {
     private class Cell {
         FrameLayout root;
         VideoView vv;
+        /** 铺在 VideoView 之上的透明接点击层（见 cellView 里的说明）。 */
+        View tapCatcher;
         MediaPlayer mp;
         SeekBar sb;
         TextView placeholder;
@@ -1669,6 +1671,26 @@ public class MainActivity extends AppCompatActivity {
         c.vv.setLayoutParams(new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         cell.addView(c.vv);
 
+        // 全格透明的「接点击」层，铺在 VideoView 之上、逐格控件之下。
+        //
+        // 为什么非要有它：真机实测（adb input tap + 日志）——
+        //   点格子的黑边 → tap#cell 触发；
+        //   点视频画面   → **两个监听器都不触发**。
+        // 注意后半句：连 cell 的兜底都没走到，说明画面那块区域上的触摸
+        // 在视图层级里压根没落到可用目标上 —— 不是"被 VideoView 吞了但没响应"。
+        //
+        // VideoView 是 SurfaceView，它的 Surface 由系统合成器单独摆放、并在窗口上开洞。
+        // 与其去猜它在触摸分派上的脾气（不同 ROM 还不一样），
+        // 不如在它上面盖一层**没有 Surface 的普通 View** 来收点击 —— 行为完全可预期。
+        c.tapCatcher = new View(this);
+        c.tapCatcher.setLayoutParams(new FrameLayout.LayoutParams(-1, -1));
+        c.tapCatcher.setBackgroundColor(Color.TRANSPARENT);
+        c.tapCatcher.setOnClickListener(v -> {
+            Log.d(TAG, "tap#catcher cell=" + index);
+            onCellTap(index);
+        });
+        cell.addView(c.tapCatcher);
+
         c.placeholder = new TextView(this);
         c.placeholder.setText("—");
         c.placeholder.setTextColor(0xFF3A3A40);
@@ -1793,10 +1815,18 @@ public class MainActivity extends AppCompatActivity {
         // —— 传 null 只清监听器，clickable 反被置成 true，
         // 于是 VideoView 的 onTouchEvent 返回 true 把触摸全吞了，cell 永远收不到。
         // 显式 setClickable(false) 也不如直接把监听器挂在这里来得稳。
-        c.vv.setOnClickListener(v -> onCellTap(fixIdx));
+        // 日志里区分"点到了画面还是黑边" —— 之前出现过"只有点黑边有反应"的现象，
+        // 这两个入口打不同标记，出问题时 `adb logcat -s VideoWall` 一看就知道是哪条通路没走到。
+        c.vv.setOnClickListener(v -> {
+            Log.d(TAG, "tap#video cell=" + fixIdx);
+            onCellTap(fixIdx);
+        });
 
         // 视频之外的边角（格子内边距、空态占位、播放图标）也归到同一处理
-        cell.setOnClickListener(v -> onCellTap(fixIdx));
+        cell.setOnClickListener(v -> {
+            Log.d(TAG, "tap#cell cell=" + fixIdx);
+            onCellTap(fixIdx);
+        });
 
         c.vv.setOnErrorListener((mp, what, extra) -> {
             // 关键：先断开引用再报错。
