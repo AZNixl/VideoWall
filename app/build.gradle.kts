@@ -14,8 +14,9 @@ android {
         applicationId = "com.aznixl.videowall"
         minSdk = 24
         targetSdk = 36
+        // versionCode 必须比上一次发布的 22 大，否则装不上（覆盖安装要求 code 递增）
         versionCode = 23
-        versionName = "3.2"
+        versionName = "3.1"
     }
 
     // 发布签名。

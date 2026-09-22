@@ -107,13 +107,25 @@ jobs:
           set -e
           APK=app/build/outputs/apk/release/app-release.apk
           mv "$APK" "app/build/outputs/apk/release/VideoWall-${GITHUB_REF_NAME}-release.apk"
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "VideoWall ${GITHUB_REF_NAME}" \
-            --notes "Automated build of VideoWall ${GITHUB_REF_NAME}.
+
+          NOTES="Automated build of VideoWall ${GITHUB_REF_NAME}.
 
           - Signed with the project release key (see README for the certificate fingerprint).
           - Android 7.0+ (minSdk 24). No native libraries, so it runs on armeabi-v7a, arm64-v8a and x86 alike.
           - Installable over any earlier build signed with the same key.
 
-          See CHANGELOG.md for the full version history." \
-            app/build/outputs/apk/release/*.apk
+          See CHANGELOG.md for the full version history."
+
+          # 同一个 tag 可能被重发（比如把 tag 强制移到新提交上）。
+          # 这时候 gh release create 会因为"已存在"直接失败，把整个 job 带下去 ——
+          # 所以先探一下，已存在就改成覆盖资产 + 更新说明。
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} 已存在，覆盖资产与说明"
+            gh release upload "${GITHUB_REF_NAME}" app/build/outputs/apk/release/*.apk --clobber
+            gh release edit "${GITHUB_REF_NAME}" --notes "$NOTES"
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "VideoWall ${GITHUB_REF_NAME}" \
+              --notes "$NOTES" \
+              app/build/outputs/apk/release/*.apk
+          fi
