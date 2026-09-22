@@ -74,6 +74,26 @@ android {
     }
 }
 
+// fork 之后一般没有发布密钥。这时候 release 会退回 debug 签名 —— 包能装，
+// 但**装不上官方版本**（签名不同，Android 不允许覆盖）。这条提示就是给这种情况的，
+// 免得拿到一个"看着像 release 其实是 debug"的包，装机失败还找不到原因。
+//
+// 注意：这里重新判定了一次条件，而不是去读 signingConfigs ——
+// 脚本顶层作用域拿不到 android 扩展里的 signingConfigs（会 Unresolved reference）。
+afterEvaluate {
+    val hasReleaseKey = rootProject.file("keystore.properties").exists()
+            || System.getenv("KEYSTORE_FILE") != null
+    logger.lifecycle(
+        if (hasReleaseKey) {
+            "[videowall] release 用项目自己的发布密钥签名"
+        } else {
+            "[videowall] 没找到发布密钥（keystore.properties 或 KEYSTORE_FILE 环境变量），" +
+                "release 退回 debug 签名 —— 能装，但覆盖安装不了官方版本。" +
+                "自用无所谓；要发版就自己生成一个 keystore（见 README「发布签名」）"
+        }
+    )
+}
+
 dependencies {
     // Material 3（含 AppCompat 与明暗切换能力）。
     // 这是本项目唯一的第三方依赖 —— 此前版本是零依赖，为了拿到

@@ -3,7 +3,7 @@
 至多 4 路视频同时铺满屏幕播放的 Android 应用。
 
 - 项目地址：<https://github.com/AZNixl/VideoWall>
-- **下载**：<https://github.com/AZNixl/VideoWall/releases> —— 取 `app-release.apk`，用发布密钥签名
+- **下载**：<https://github.com/AZNixl/VideoWall/releases> —— 取 `VideoWall-<版本>-release.apk`，用发布密钥签名
 - 包名 `com.aznixl.videowall` · minSdk 24 / targetSdk 36
 - 第三方依赖只有 **Material Components**（Material 3 主题 + 明暗切换）
 - 视频解码/渲染全部走平台 API：`VideoView` / `MediaPlayer`
@@ -179,6 +179,30 @@ armeabi-v7a / arm64-v8a / x86 都能装。
 ---
 
 ## 7. 编译与发布签名
+
+### fork 之后怎么构建
+
+**不需要任何密钥、不需要改任何文件**，克隆下来直接编：
+
+```bash
+git clone https://github.com/AZNixl/VideoWall.git
+cd VideoWall
+./gradlew assembleDebug        # Windows 用 gradlew.bat
+```
+
+前提只有两个：**JDK 17** 和**能用的 Android SDK**（`compileSdk 36` / `build-tools 36.0.0`）。
+SDK 位置要么写进 `local.properties`（`sdk.dir=...`，这个文件已 gitignore），
+要么设 `ANDROID_HOME` 环境变量 —— 两者有一个就行。
+
+依赖只有 Material 3 和一个下拉刷新库，都会从 Maven Central 正常拉取。
+APK 里**没有 native 库**，所以不用配 NDK，任何 ABI 都能跑（见 §6）。
+
+> `gradlew`、`gradle-wrapper.jar`、`.gitattributes`（统一 LF）都已入库 ——
+> 这四样缺任何一样，别人克隆下来就编不动。`.gitattributes` 尤其容易被忽略：
+> 它不在的话，Windows 上提交会把 `gradlew` 变成 CRLF，
+> Linux/macOS 执行时报 `bad interpreter`。
+
+### 发布签名
 
 需要 JDK 17 + Android SDK（`compileSdk 36`，`build-tools 36.0.0`）。
 
