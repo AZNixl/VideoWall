@@ -289,6 +289,48 @@ public final class Prefs {
         sp.edit().putBoolean("videoSortAsc", v).apply();
     }
 
+    // 浏览模式
+    /** 按文件夹（默认）：文件夹列表 → 点进去是视频。 */
+    public static final int BROWSE_FOLDER = 0;
+    /** 树形目录：按真实路径层级展开。 */
+    public static final int BROWSE_TREE = 1;
+    /** 视频：不分文件夹，所有视频平铺。 */
+    public static final int BROWSE_VIDEO = 2;
+
+    public int browseMode() {
+        int v = sp.getInt("browseMode", BROWSE_FOLDER);
+        return (v >= BROWSE_FOLDER && v <= BROWSE_VIDEO) ? v : BROWSE_FOLDER;
+    }
+
+    public void setBrowseMode(int v) {
+        sp.edit().putInt("browseMode", v).apply();
+    }
+
+    // ---- 字幕
+
+    /** 字幕文字大小（sp）。 */
+    public int subtitleSize() {
+        return sp.getInt("subSize", 16);
+    }
+
+    public void setSubtitleSize(int v) {
+        sp.edit().putInt("subSize", v).apply();
+    }
+
+    /**
+     * 字幕字符编码。空串 = 自动（先按 UTF-8 解，出现替换字符再转 GB18030）。
+     * 之所以让用户能手动指定：网上的中文字幕什么编码都有，
+     * 自动猜错就是满屏问号，得留一个人工兜底。
+     */
+    public String subtitleCharset() {
+        String s = sp.getString("subCharset", "");
+        return s == null ? "" : s;
+    }
+
+    public void setSubtitleCharset(String v) {
+        sp.edit().putString("subCharset", v == null ? "" : v).apply();
+    }
+
     /** 首页文件夹用两列网格还是单列列表。 */
     public boolean folderGrid() {
         return sp.getBoolean("folderGrid", false);

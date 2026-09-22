@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  音轨 / 语言选择：地球（带经纬线的圆）。
+  这是通行的"语言"符号；比"喇叭+列表"更短，也避免和旁边的音量键混淆。
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:pathData="M12,2.2a9.8,9.8 0 1,0 0,19.6a9.8,9.8 0 1,0 0,-19.6z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.6"
+        android:pathData="M12,2.2a5.2,9.8 0 1,0 0,19.6a5.2,9.8 0 1,0 0,-19.6z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M2.4,12 L21.6,12" />
+</vector>

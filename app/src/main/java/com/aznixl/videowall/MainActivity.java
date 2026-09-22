@@ -3,6 +3,7 @@ package com.aznixl.videowall;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.app.Dialog;
 import android.content.ContentUris;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -212,6 +213,10 @@ public class MainActivity extends AppCompatActivity {
     private final List<long[]> subCues = new ArrayList<>();
     private final List<String> subTexts = new ArrayList<>();
     private boolean subOn;
+    /** 字幕文件的原始字节。留着它，改编码时才能直接重解码而不用再读一遍文件。 */
+    private byte[] subRaw;
+    /** 字幕来源的简短说明（显示在弹窗里）。 */
+    private String subSourceName = "";
     /** 字幕文字层。 */
     private TextView subLabel;
     /** 记住"哪个视频配了哪个字幕文件"，用 ActionOpenDocument 拿到的 URI。 */
@@ -219,6 +224,10 @@ public class MainActivity extends AppCompatActivity {
 
     private ImageView abButton;
     private ImageView subtitleButton;
+    /** 单视频时的音轨（语言）选择键。 */
+    private ImageView languageButton;
+    /** 每格当前选中的音轨下标（全局 track index）。-1 = 没手动选过，用播放器默认。 */
+    private final int[] selectedAudioTrack = {-1, -1, -1, -1};
     private AudioManager audioManager;
 
     /** 手势提示浮层（调亮度/音量时中间弹一下）。 */
@@ -265,6 +274,11 @@ public class MainActivity extends AppCompatActivity {
         final long dateAdded;
         final long bucketId;
         final String bucketName;
+        /**
+         * 所在目录的相对路径（形如 `DCIM/Camera`，无前后斜杠）。树形目录模式用。
+         * 拿不到就是空串 —— 那种视频在树里归到「未分类」下。
+         */
+        String relDir = "";
 
         /** 起播前探测出的显示分辨率（已按旋转角修正）；未知为 0。 */
         int videoW;
@@ -524,6 +538,7 @@ public class MainActivity extends AppCompatActivity {
         Uri uri = data.getData();
         if (uri == null) return;
         if (!loadSrt(uri)) return;
+        subSourceName = "手动选择";
         int idx = gestureCell();
         if (idx >= 0 && idx < MAX_CELLS && cells[idx] != null) {
             subUriByVideo.put(cells[idx].videoId, uri.toString());
@@ -1102,47 +1117,107 @@ public class MainActivity extends AppCompatActivity {
                 .show();
     }
 
-    /** 重建弹窗内容。任何一项改了都整体重建一次 —— 项很少，比逐项刷状态简单可靠。 */
+    /**
+     * 建一次弹窗内容。之后每次选择只让 [chipRow] 原地刷新，
+     * 不再整体重建 —— 详见 [chipRow] 的说明。
+     */
     private void fillBrowseDialog(LinearLayout box) {
-        box.removeAllViews();
+        box.addView(browseSection("浏览模式"));
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"文件夹", "树形目录", "视频"};
+            }
+
+            @Override
+            public int selected() {
+                return prefs.browseMode();
+            }
+        }, i -> {
+            prefs.setBrowseMode(i);
+            // 换模式时把"当前文件夹"归零，否则从文件夹切到视频再切回来会停在上次那个文件夹里
+            openedFolder = null;
+            breadcrumb.setVisibility(View.GONE);
+            refreshPickUi();
+        }));
 
         box.addView(browseSection("排布"));
-        box.addView(browseChips(new String[]{"单列列表", "两列网格"},
-                prefs.folderGrid() ? 1 : 0,
-                i -> {
-                    prefs.setFolderGrid(i == 1);
-                    syncTopButtons();
-                    refreshPickUi();
-                    fillBrowseDialog(box);
-                }));
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"单列列表", "两列网格"};
+            }
+
+            @Override
+            public int selected() {
+                return prefs.folderGrid() ? 1 : 0;
+            }
+        }, i -> {
+            prefs.setFolderGrid(i == 1);
+            syncTopButtons();
+            refreshPickUi();
+        }));
 
         box.addView(browseSection("文件夹排序"));
-        box.addView(browseChips(new String[]{"名称", "数量"},
-                prefs.folderSort() == Prefs.FOLDER_BY_NAME ? 0 : 1,
-                i -> {
-                    prefs.setFolderSort(i == 0 ? Prefs.FOLDER_BY_NAME : Prefs.FOLDER_BY_COUNT);
-                    resortAndRefresh();
-                    fillBrowseDialog(box);
-                }));
-        box.addView(browseChips(new String[]{folderOrderLabel()}, 0, i -> {
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"名称", "数量"};
+            }
+
+            @Override
+            public int selected() {
+                return prefs.folderSort() == Prefs.FOLDER_BY_NAME ? 0 : 1;
+            }
+        }, i -> {
+            prefs.setFolderSort(i == 0 ? Prefs.FOLDER_BY_NAME : Prefs.FOLDER_BY_COUNT);
+            resortAndRefresh();
+        }));
+        // 顺序键的文字会随排序依据变（A→Z / 最多优先），所以文字也得走 RowState
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{folderOrderLabel()};
+            }
+
+            @Override
+            public int selected() {
+                return 0;
+            }
+        }, i -> {
             prefs.setFolderSortAsc(!prefs.folderSortAsc());
             resortAndRefresh();
-            fillBrowseDialog(box);
         }));
 
         box.addView(browseSection("视频排序"));
-        box.addView(browseChips(new String[]{"名称", "时长", "大小", "日期"},
-                videoSortIndex(),
-                i -> {
-                    prefs.setVideoSort(new int[]{Prefs.VIDEO_BY_NAME, Prefs.VIDEO_BY_DURATION,
-                            Prefs.VIDEO_BY_SIZE, Prefs.VIDEO_BY_DATE}[i]);
-                    resortAndRefresh();
-                    fillBrowseDialog(box);
-                }));
-        box.addView(browseChips(new String[]{videoOrderLabel()}, 0, i -> {
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"名称", "时长", "大小", "日期"};
+            }
+
+            @Override
+            public int selected() {
+                return videoSortIndex();
+            }
+        }, i -> {
+            prefs.setVideoSort(new int[]{Prefs.VIDEO_BY_NAME, Prefs.VIDEO_BY_DURATION,
+                    Prefs.VIDEO_BY_SIZE, Prefs.VIDEO_BY_DATE}[i]);
+            resortAndRefresh();
+        }));
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{videoOrderLabel()};
+            }
+
+            @Override
+            public int selected() {
+                return 0;
+            }
+        }, i -> {
             prefs.setVideoSortAsc(!prefs.videoSortAsc());
             resortAndRefresh();
-            fillBrowseDialog(box);
         }));
     }
 
@@ -1186,6 +1261,73 @@ public class MainActivity extends AppCompatActivity {
         refreshPickUi();
     }
 
+    /**
+     * 一行胶囊的「值来源」。
+     *
+     * 之所以要这个东西：胶囊的选中态和文字都可能随操作变
+     * （排序换了依据，"Z → A" 就得变成"最多优先"；字幕换了编码，选中项要跟着走）。
+     */
+    private interface RowState {
+        /** 每项当前该显示的文字。 */
+        String[] labels();
+
+        /** 当前选中的下标。 */
+        int selected();
+    }
+
+    /**
+     * 弹窗里的一行可选胶囊。
+     *
+     * **点完在原地改颜色和文字，不重建视图树。**
+     * 原来是每次选择都 box.removeAllViews() 整体重建 —— 普通界面没问题，
+     * 但对话框的窗口尺寸是 show() 的时候定下来的，重建之后要靠一次完整 relayout
+     * 才反映得出来，实测不稳（表现为"选完没变，关掉重开才看到"）。
+     * 原地 setTextColor/setBackground 只触发重绘，不依赖布局流程。
+     */
+    private LinearLayout chipRow(RowState state, OnPick onPick) {
+        String[] labels = state.labels();
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        final List<TextView> chips = new ArrayList<>();
+        for (int i = 0; i < labels.length; i++) {
+            final int idx = i;
+            TextView chip = new TextView(this);
+            chip.setTextSize(13);
+            chip.setGravity(Gravity.CENTER);
+            chip.setPadding(d(14), d(8), d(14), d(8));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            lp.setMargins(0, 0, d(8), d(6));
+            chip.setLayoutParams(lp);
+            chip.setOnClickListener(v -> {
+                onPick.on(idx);
+                restyleChips(chips, state);
+            });
+            chips.add(chip);
+            row.addView(chip);
+        }
+        restyleChips(chips, state);
+        return row;
+    }
+
+    /** 按当前状态给这一行的胶囊上色 / 换字。只改属性，不增删 View。 */
+    private void restyleChips(List<TextView> chips, RowState state) {
+        String[] labels = state.labels();
+        int sel = state.selected();
+        for (int i = 0; i < chips.size(); i++) {
+            TextView chip = chips.get(i);
+            if (labels != null && i < labels.length && !labels[i].contentEquals(chip.getText())) {
+                chip.setText(labels[i]);
+            }
+            boolean on = i == sel;
+            chip.setTextColor(on ? ACCENT : TEXT_PRIMARY);
+            GradientDrawable bg = new GradientDrawable();
+            bg.setColor(on ? CHIP_ON : CHIP);
+            bg.setCornerRadius(50 * dp);
+            bg.setStroke(d(on ? 2 : 0), ACCENT);
+            chip.setBackground(bg);
+        }
+    }
+
     private TextView browseSection(String text) {
         TextView t = new TextView(this);
         t.setText(text);
@@ -1196,32 +1338,6 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** 一行可选的胶囊。选中的用强调色描边 + 强调色文字。 */
-    private LinearLayout browseChips(String[] labels, int selected, OnPick onPick) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < labels.length; i++) {
-            final int idx = i;
-            boolean on = i == selected;
-            TextView chip = new TextView(this);
-            chip.setText(labels[i]);
-            chip.setTextSize(13);
-            chip.setGravity(Gravity.CENTER);
-            chip.setPadding(d(14), d(8), d(14), d(8));
-            chip.setTextColor(on ? ACCENT : TEXT_PRIMARY);
-            GradientDrawable bg = new GradientDrawable();
-            bg.setColor(on ? CHIP_ON : CHIP);
-            bg.setCornerRadius(50 * dp);
-            bg.setStroke(d(on ? 2 : 0), ACCENT);
-            chip.setBackground(bg);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-            lp.setMargins(0, 0, d(8), d(6));
-            chip.setLayoutParams(lp);
-            chip.setOnClickListener(v -> onPick.on(idx));
-            row.addView(chip);
-        }
-        return row;
-    }
-
     /** 刷新选择页顶栏两个切换键的图标（都表示"当前是什么"）。 */
     private void syncTopButtons() {
         if (themeButton != null) {
@@ -1369,6 +1485,17 @@ public class MainActivity extends AppCompatActivity {
 
     private void refreshPickUi() {
         renderSlots();
+
+        // 树形 / 视频模式没有"当前文件夹"的概念，先归零
+        int mode = prefs.browseMode();
+        if (mode != Prefs.BROWSE_FOLDER) {
+            openedFolder = null;
+            breadcrumb.setVisibility(View.GONE);
+            if (mode == Prefs.BROWSE_TREE) renderTree();
+            else renderAllVideos();
+            return;
+        }
+
         // 正在看的文件夹在设置里被排除了 → 退回首页，别停在"看不见的"列表里
         if (openedFolder != null
                 && Prefs.parseFolders(prefs.excludedFolders()).containsKey(openedFolder.id)) {
@@ -1380,6 +1507,186 @@ public class MainActivity extends AppCompatActivity {
         } else {
             renderVideos(openedFolder);
         }
+    }
+
+    // ---- 视频模式：所有视频平铺，不分文件夹
+
+    private void renderAllVideos() {
+        if (loading) {
+            listContainer.addView(hint("正在读取媒体库…"));
+            return;
+        }
+        if (allItems.isEmpty()) {
+            listContainer.addView(hint("媒体库里还没有视频"));
+            return;
+        }
+        Folder all = new Folder(-1, "全部视频");
+        all.items.addAll(allItems);
+        Collections.sort(all.items, itemComparator());
+        renderVideos(all);
+    }
+
+    // ---- 树形目录模式：按真实路径层级展开
+
+    private static class TreeNode {
+        final String name;
+        /** 从根到这里的路径（"A/B"），用作展开状态的 key。 */
+        final String path;
+        final Map<String, TreeNode> children = new LinkedHashMap<>();
+        final List<Item> videos = new ArrayList<>();
+
+        TreeNode(String name, String path) {
+            this.name = name;
+            this.path = path;
+        }
+    }
+
+    /** 已展开的目录路径。放内存里 —— 展开状态不值得持久化。 */
+    private final java.util.Set<String> treeExpanded = new java.util.HashSet<>();
+
+    private void renderTree() {
+        listContainer.removeAllViews();
+        if (loading) {
+            listContainer.addView(hint("正在读取媒体库…"));
+            return;
+        }
+        if (allItems.isEmpty()) {
+            listContainer.addView(hint("媒体库里还没有视频"));
+            return;
+        }
+        TreeNode root = buildTree();
+        Log.i(TAG, "树形目录：" + countNodes(root) + " 个目录，顶层 " + root.children.size()
+                + " 个，根下视频 " + root.videos.size());
+        for (TreeNode child : root.children.values()) {
+            addTreeRows(child, 0);
+        }
+        // 直接躺在存储根目录下的视频（relDir 为空）
+        for (Item it : root.videos) {
+            listContainer.addView(treeVideoRow(it));
+        }
+    }
+
+    private TreeNode buildTree() {
+        TreeNode root = new TreeNode("", "");
+        for (Item it : allItems) {
+            TreeNode node = root;
+            if (it.relDir != null && !it.relDir.isEmpty()) {
+                StringBuilder path = new StringBuilder();
+                for (String seg : it.relDir.split("/")) {
+                    if (seg.isEmpty()) continue;
+                    if (path.length() > 0) path.append('/');
+                    path.append(seg);
+                    TreeNode child = node.children.get(seg);
+                    if (child == null) {
+                        child = new TreeNode(seg, path.toString());
+                        node.children.put(seg, child);
+                    }
+                    node = child;
+                }
+            }
+            node.videos.add(it);
+        }
+        return root;
+    }
+
+    private void addTreeRows(TreeNode node, int depth) {
+        boolean open = treeExpanded.contains(node.path);
+        listContainer.addView(treeFolderRow(node, depth, open));
+        if (!open) return;
+        for (TreeNode child : node.children.values()) {
+            addTreeRows(child, depth + 1);
+        }
+        for (Item it : node.videos) {
+            listContainer.addView(treeVideoRow(it));
+        }
+    }
+
+    /** 树里的一行目录：缩进 + ▸/▾ + 名字 + 子树里的视频数。 */
+    private View treeFolderRow(TreeNode node, int depth, boolean open) {
+        LinearLayout r = new LinearLayout(this);
+        r.setOrientation(LinearLayout.HORIZONTAL);
+        r.setGravity(Gravity.CENTER_VERTICAL);
+        r.setPadding(d(6) + d(16) * depth, d(12), d(10), d(12));
+        card(r);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.setMargins(0, d(4), 0, d(4));
+        r.setLayoutParams(lp);
+
+        TextView arrow = new TextView(this);
+        arrow.setText(open ? "▾" : "▸");
+        arrow.setTextSize(12);
+        arrow.setTextColor(ACCENT);
+        arrow.setWidth(d(20));
+        r.addView(arrow);
+
+        TextView n = new TextView(this);
+        n.setText(node.name);
+        n.setTextColor(TEXT_PRIMARY);
+        n.setTextSize(14);
+        n.setMaxLines(1);
+        n.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        r.addView(n, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        TextView c = new TextView(this);
+        c.setText(subtreeCount(node) + " 个");
+        c.setTextColor(MUTED);
+        c.setTextSize(11);
+        c.setPadding(d(8), 0, 0, 0);
+        r.addView(c);
+
+        r.setOnClickListener(v -> {
+            if (open) treeExpanded.remove(node.path);
+            else treeExpanded.add(node.path);
+            renderTree();
+        });
+        return r;
+    }
+
+    private int subtreeCount(TreeNode n) {
+        int c = n.videos.size();
+        for (TreeNode ch : n.children.values()) c += subtreeCount(ch);
+        return c;
+    }
+
+    private int countNodes(TreeNode n) {
+        int c = n.children.size();
+        for (TreeNode ch : n.children.values()) c += countNodes(ch);
+        return c;
+    }
+
+    /** 树里的视频行：拿普通的行加个左边距当缩进。 */
+    private View treeVideoRow(Item it) {
+        View v = videoRow(it);
+        if (v.getLayoutParams() instanceof LinearLayout.LayoutParams) {
+            LinearLayout.LayoutParams lp = (LinearLayout.LayoutParams) v.getLayoutParams();
+            lp.leftMargin = d(34);
+            v.setLayoutParams(lp);
+        }
+        return v;
+    }
+
+    /**
+     * 把 RELATIVE_PATH（"DCIM/Camera/"）或 DATA（绝对路径）统一成 "DCIM/Camera"。
+     *
+     * 两个来源取到的形状不一样，树形目录要的是同一种：不带首尾斜杠的相对目录。
+     */
+    private static String toRelDir(String raw) {
+        if (raw == null || raw.isEmpty()) return "";
+        String s = raw.replace('\\', '/');
+        if (s.startsWith("/")) {
+            int lastSlash = s.lastIndexOf('/');
+            if (lastSlash > 0) s = s.substring(0, lastSlash);   // 去掉文件名
+            for (String p : new String[]{"/storage/emulated/0/", "/storage/self/primary/",
+                    "/sdcard/", "/storage/emulated/0", "/sdcard"}) {
+                if (s.startsWith(p)) {
+                    s = s.substring(p.length());
+                    break;
+                }
+            }
+        }
+        while (s.startsWith("/")) s = s.substring(1);
+        while (s.endsWith("/")) s = s.substring(0, s.length() - 1);
+        return s;
     }
 
     // ---- 文件夹列表
@@ -1824,7 +2131,19 @@ public class MainActivity extends AppCompatActivity {
         topBar.setOrientation(LinearLayout.HORIZONTAL);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
         topBar.setBackgroundColor(OVER_VIDEO_SCRIM);
-        topBar.addView(pillIconFlat(R.drawable.ic_back, v -> exitPlayMode()));
+
+        // 键放在横向滚动容器里。单视频时最多 8 个键
+        // （返回/播放暂停/重播/布局/音频/A-B/字幕/语言），每个 152px，
+        // 在 1440 宽的屏上已经贴边 —— 再多一个就出去了，用滚动兜住。
+        LinearLayout keys = new LinearLayout(this);
+        keys.setOrientation(LinearLayout.HORIZONTAL);
+        keys.setGravity(Gravity.CENTER_VERTICAL);
+        HorizontalScrollView keyScroller = new HorizontalScrollView(this);
+        keyScroller.setHorizontalScrollBarEnabled(false);
+        keyScroller.addView(keys);
+        topBar.addView(keyScroller, new LinearLayout.LayoutParams(-1, -2));
+
+        keys.addView(pillIconFlat(R.drawable.ic_back, v -> exitPlayMode()));
 
         // 播放/暂停合成一个键：图标显示"点它会做什么"（在播就显示暂停）
         playPauseAllButton = pillIconFlat(R.drawable.ic_pause, v -> {
@@ -1840,10 +2159,10 @@ public class MainActivity extends AppCompatActivity {
             updateCellChrome();
             showControls();
         });
-        topBar.addView(playPauseAllButton);
+        keys.addView(playPauseAllButton);
 
         // 全部重播
-        topBar.addView(pillIconFlat(R.drawable.ic_replay, v -> {
+        keys.addView(pillIconFlat(R.drawable.ic_replay, v -> {
             for (Cell c : cells) {
                 if (c == null || c.mp == null) continue;
                 mpSeekTo(c, 0);
@@ -1861,7 +2180,7 @@ public class MainActivity extends AppCompatActivity {
             applyLayoutMode(true);
             showControls();
         });
-        topBar.addView(layoutButton);
+        keys.addView(layoutButton);
 
         // 音频切换：只有两档（全部 / 单路）—— 静音那一档去掉了，按需求砍的
         audioButton = pillIconFlat(R.drawable.ic_volume_up, v -> {
@@ -1874,15 +2193,18 @@ public class MainActivity extends AppCompatActivity {
                 toast("单路：点哪一格，哪一格出声");
             }
         });
-        topBar.addView(audioButton);
+        keys.addView(audioButton);
 
-        // 单视频专属的两个键。多路时隐藏 —— 四宫格里做 A-B 和字幕意义不大，
+        // 单视频专属的三个键。多路时隐藏 —— 四宫格里做 A-B / 字幕 / 选音轨意义不大，
         // 顶栏也只有一路独占时才腾得出位置。
         abButton = pillIconFlat(R.drawable.ic_ab_repeat, v -> cycleAb());
-        topBar.addView(abButton);
+        keys.addView(abButton);
 
         subtitleButton = pillIconFlat(R.drawable.ic_subtitles, v -> onSubtitleButton());
-        topBar.addView(subtitleButton);
+        keys.addView(subtitleButton);
+
+        languageButton = pillIconFlat(R.drawable.ic_language, v -> onAudioTrackButton());
+        keys.addView(languageButton);
 
         FrameLayout.LayoutParams tbLp = new FrameLayout.LayoutParams(-1, -2);
         tbLp.gravity = Gravity.TOP;
@@ -1899,7 +2221,8 @@ public class MainActivity extends AppCompatActivity {
         subLabel.setVisibility(View.GONE);
         FrameLayout.LayoutParams subLp = new FrameLayout.LayoutParams(-1, -2);
         subLp.gravity = Gravity.BOTTOM;
-        subLp.bottomMargin = d(96);
+        // 这是个兜底值，真位置由 layoutSubtitle() 按**视频画面**底边算出来再改
+        subLp.bottomMargin = d(20);
         f.addView(subLabel, subLp);
 
         // 手势提示浮层（亮度/音量）。放正中，滑完自己淡出。
@@ -2415,6 +2738,7 @@ public class MainActivity extends AppCompatActivity {
             abB = -1;
             toast("已清除 A-B 循环");
         }
+        Log.i(TAG, "A-B 循环 -> a=" + abA + " b=" + abB);
         syncSingleButtons();
         showControls();
     }
@@ -2427,6 +2751,7 @@ public class MainActivity extends AppCompatActivity {
         Cell c = cells[idx];
         if (c == null || c.mp == null || c.userSeeking || !mpIsPlaying(c)) return;
         if (mpPosition(c) >= abB) {
+            Log.i(TAG, "A-B 回跳 " + abB + " -> " + abA);
             mpSeekTo(c, (int) abA);
         }
     }
@@ -2441,34 +2766,15 @@ public class MainActivity extends AppCompatActivity {
      * 而实际用得到的场景九成是"视频旁边放一个同名 .srt"。自己解析 SRT 格式简单、
      * 完全可控，渲染也只是一个随播放位置更新的 TextView，不依赖任何播放器 API。
      */
+    /**
+     * 字幕键：打开字幕设置弹窗（开关 / 字号 / 编码）。
+     *
+     * 不再做成"点一下循环开关"—— 字号和编码也得能调，循环表达不了。
+     */
     private void onSubtitleButton() {
-        if (!subCues.isEmpty()) {
-            subOn = !subOn;
-            if (!subOn) subLabel.setVisibility(View.GONE);
-            syncSingleButtons();
-            toast(subOn ? "字幕：显示" : "字幕：隐藏");
-            showControls();
-            return;
-        }
-        int idx = gestureCell();
-        Cell c = (idx >= 0 && idx < MAX_CELLS) ? cells[idx] : null;
-        if (c == null || c.mp == null) {
-            toast("这一格还没有视频");
-            return;
-        }
-        String remembered = subUriByVideo.get(c.videoId);
-        if (remembered != null) {
-            if (loadSrt(Uri.parse(remembered))) return;
-            subUriByVideo.remove(c.videoId);
-        }
-        // 先试着自动找同目录同名的 .srt
-        Uri auto = findSiblingSrt(c);
-        if (auto != null && loadSrt(auto)) {
-            subUriByVideo.put(c.videoId, auto.toString());
-            return;
-        }
-        toast("没找到同名字幕，请手动选一个 .srt 文件");
-        pickSrtFile();
+        Log.i(TAG, "字幕键 -> 弹窗（已有 " + subCues.size() + " 条，on=" + subOn + "）");
+        showSubtitleDialog();
+        showControls();
     }
 
     /** 在媒体库里找"和这个视频同目录、同主文件名"的 .srt。找不到返回 null。 */
@@ -2515,26 +2821,34 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    /** 读入并解析 SRT。成功返回 true。 */
+    /**
+     * 读入并解析 SRT。成功返回 true。
+     *
+     * **原始字节会留在内存里**（`subRaw`）—— 这样在弹窗里改字符编码时可以直接重新解码，
+     * 不用再读一次文件，也不怕那个 URI 已经失效。
+     */
     private boolean loadSrt(Uri uri) {
-        List<long[]> cues = new ArrayList<>();
-        List<String> texts = new ArrayList<>();
         try (InputStream in = getContentResolver().openInputStream(uri)) {
             if (in == null) return false;
-            byte[] raw = readAll(in);
-            // 编码要试两遍：网上下来的中文字幕有相当一部分是 GBK/GB18030，
-            // 一律按 UTF-8 读会得到满屏问号。UTF-8 解出来没有替换字符才认。
-            String text = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
-            if (text.indexOf('\uFFFD') >= 0) {
-                try {
-                    text = new String(raw, "GB18030");
-                    Log.i(TAG, "字幕按 GB18030 解码");
-                } catch (Throwable ignored) {
-                }
-            }
-            parseSrt(new BufferedReader(new java.io.StringReader(text)), cues, texts);
+            subRaw = readAll(in);
         } catch (Throwable t) {
             Log.w(TAG, "读字幕失败", t);
+            toast("读不到这个字幕文件");
+            return false;
+        }
+        return applySubtitleBytes();
+    }
+
+    /** 用当前编码偏好把 `subRaw` 解出来并解析。 */
+    private boolean applySubtitleBytes() {
+        if (subRaw == null || subRaw.length == 0) return false;
+        String text = decodeSrt(subRaw);
+        List<long[]> cues = new ArrayList<>();
+        List<String> texts = new ArrayList<>();
+        try {
+            parseSrt(new BufferedReader(new java.io.StringReader(text)), cues, texts);
+        } catch (Throwable t) {
+            Log.w(TAG, "解析字幕失败", t);
             return false;
         }
         if (cues.isEmpty()) {
@@ -2546,10 +2860,198 @@ public class MainActivity extends AppCompatActivity {
         subTexts.clear();
         subTexts.addAll(texts);
         subOn = true;
+        applySubtitleSize();
         syncSingleButtons();
-        toast("字幕已加载，共 " + cues.size() + " 条");
-        showControls();
         return true;
+    }
+
+    /**
+     * 按偏好解码字幕字节。
+     *
+     * 自动档的判据是"UTF-8 解出来有没有替换字符" —— 中文 GBK 字节喂给 UTF-8 解码器
+     * 几乎必然产生 U+FFFD，反过来正常的 UTF-8 不会。够用的启发式。
+     * 另外顺手剥掉 BOM，否则第一条字幕会带个看不见的字符。
+     */
+    private String decodeSrt(byte[] raw) {
+        String cs = prefs.subtitleCharset();
+        String out = null;
+        if (!cs.isEmpty()) {
+            try {
+                out = new String(raw, cs);
+                Log.i(TAG, "字幕按指定编码 " + cs + " 解码");
+            } catch (Throwable t) {
+                Log.w(TAG, "按 " + cs + " 解码失败，改用自动", t);
+            }
+        }
+        if (out == null) {
+            String utf8 = new String(raw, java.nio.charset.StandardCharsets.UTF_8);
+            if (utf8.indexOf('\uFFFD') < 0) {
+                out = utf8;
+            } else {
+                try {
+                    out = new String(raw, "GB18030");
+                    Log.i(TAG, "字幕自动判定为 GB18030");
+                } catch (Throwable t) {
+                    out = utf8;
+                }
+            }
+        }
+        if (!out.isEmpty() && out.charAt(0) == '\uFEFF') out = out.substring(1);
+        return out;
+    }
+
+    /** 把偏好里的字号应用到字幕层。 */
+    private void applySubtitleSize() {
+        if (subLabel != null) subLabel.setTextSize(prefs.subtitleSize());
+    }
+
+    // -------------------------------------------------- 字幕弹窗
+
+    /** 字幕设置弹窗：开关 / 字号 / 编码。内容建一次，之后靠 chipRow 原地刷新。 */
+    private void showSubtitleDialog() {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(d(20), d(4), d(20), d(4));
+        Dialog dlg = new MaterialAlertDialogBuilder(this)
+                .setTitle("字幕")
+                .setView(box)
+                .setPositiveButton("完成", null)
+                .create();
+        fillSubtitleDialog(box, dlg);
+        dlg.show();
+    }
+
+    private void fillSubtitleDialog(LinearLayout box, Dialog dlg) {
+        int idx = gestureCell();
+        Cell c = (idx >= 0 && idx < MAX_CELLS) ? cells[idx] : null;
+        boolean hasVideo = c != null && c.mp != null;
+
+        // 状态说明。加载完字幕之后文字会变，所以留着引用原地改
+        final TextView info = new TextView(this);
+        info.setTextColor(MUTED);
+        info.setTextSize(12);
+        Runnable syncInfo = () -> info.setText(subCues.isEmpty()
+                ? (hasVideo ? "还没加载字幕。开启后会先找同名的 .srt，找不到再让你手动选。"
+                            : "这一格还没有视频")
+                : "已加载 " + subCues.size() + " 条"
+                  + (subSourceName.isEmpty() ? "" : "（" + subSourceName + "）"));
+        syncInfo.run();
+        box.addView(info);
+
+        box.addView(browseSection("开关"));
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"开启", "关闭"};
+            }
+
+            @Override
+            public int selected() {
+                return subOn ? 0 : 1;
+            }
+        }, i -> {
+            if (i == 0) {
+                if (!subCues.isEmpty()) {
+                    subOn = true;
+                    syncSingleButtons();
+                } else {
+                    // 还没加载过 —— 关掉弹窗再去加载/选文件，否则系统选择器会被压在下面
+                    dlg.dismiss();
+                    startSubtitleLoad();
+                    return;
+                }
+            } else {
+                subOn = false;
+                if (subLabel != null) subLabel.setVisibility(View.GONE);
+                syncSingleButtons();
+            }
+            syncInfo.run();
+        }));
+
+        box.addView(browseSection("文本大小"));
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"小", "标准", "大", "特大"};
+            }
+
+            @Override
+            public int selected() {
+                return subtitleSizeIndex();
+            }
+        }, i -> {
+            prefs.setSubtitleSize(SUB_SIZES[i]);
+            applySubtitleSize();
+        }));
+
+        box.addView(browseSection("字符编码"));
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return SUB_CHARSET_NAMES;
+            }
+
+            @Override
+            public int selected() {
+                String cur = prefs.subtitleCharset();
+                for (int i = 0; i < SUB_CHARSETS.length; i++) {
+                    if (SUB_CHARSETS[i].equalsIgnoreCase(cur)) return i;
+                }
+                return 0;
+            }
+        }, i -> {
+            prefs.setSubtitleCharset(SUB_CHARSETS[i]);
+            // 有原始字节就立刻按新编码重新解析 —— 不用重读文件
+            if (subRaw != null && applySubtitleBytes()) {
+                toast("按 " + SUB_CHARSET_NAMES[i] + " 重新解码，共 " + subCues.size() + " 条");
+                syncInfo.run();
+            }
+        }));
+
+        TextView hint = new TextView(this);
+        hint.setTextColor(MUTED);
+        hint.setTextSize(11);
+        hint.setText("中文乱码就换一个编码：简体多为 GB18030，繁体多为 BIG5。");
+        hint.setPadding(0, d(8), 0, 0);
+        box.addView(hint);
+    }
+
+    /** 字幕字号档位（sp）。 */
+    private static final int[] SUB_SIZES = {13, 16, 20, 24};
+    private static final String[] SUB_CHARSETS = {"", "UTF-8", "GB18030", "BIG5", "UTF-16"};
+    private static final String[] SUB_CHARSET_NAMES =
+            {"自动", "UTF-8", "GB18030", "BIG5", "UTF-16"};
+
+    private int subtitleSizeIndex() {
+        int cur = prefs.subtitleSize();
+        for (int i = 0; i < SUB_SIZES.length; i++) {
+            if (SUB_SIZES[i] == cur) return i;
+        }
+        return 1;
+    }
+
+    /** 找同名字幕 / 手动选。抽出来是因为弹窗和顶栏键都要用。 */
+    private void startSubtitleLoad() {
+        int idx = gestureCell();
+        Cell c = (idx >= 0 && idx < MAX_CELLS) ? cells[idx] : null;
+        if (c == null || c.mp == null) {
+            toast("这一格还没有视频");
+            return;
+        }
+        String remembered = subUriByVideo.get(c.videoId);
+        if (remembered != null && loadSrt(Uri.parse(remembered))) {
+            subSourceName = "上次选的字幕";
+            return;
+        }
+        Uri auto = findSiblingSrt(c);
+        Log.i(TAG, "找同名字幕(" + c.displayName + ") -> " + auto);
+        if (auto != null && loadSrt(auto)) {
+            subUriByVideo.put(c.videoId, auto.toString());
+            subSourceName = c.displayName.replaceAll("\\.[^.]+$", "") + ".srt";
+            return;
+        }
+        toast("没找到同名字幕，请手动选一个 .srt 文件");
+        pickSrtFile();
     }
 
     private static byte[] readAll(InputStream in) throws IOException {
@@ -2633,6 +3135,50 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /**
+     * 把字幕摆到**视频画面**的底边附近，而不是屏幕底边。
+     *
+     * 这是实测踩出来的：竖屏看 16:9 横屏片子时，画面只占屏幕中间一条 ——
+     * 1432×3160 的格子里塞 3840×2160，缩放按宽度算，画面只有 1432×805，
+     * 上下各留 1100 多像素的黑边。字幕如果按"屏幕底边往上 96dp"放，
+     * 会落到画面下方 750px 的黑边里，离画面老远。
+     *
+     * `VideoView.onMeasure` 在 EXACTLY 约束下会把自己缩到视频宽高比 ——
+     * 所以**它量出来的高度就是画面实际显示区域**，直接拿它算即可。
+     */
+    private void layoutSubtitle() {
+        if (subLabel == null || playView == null) return;
+        int idx = gestureCell();
+        if (idx < 0 || idx >= MAX_CELLS) return;
+        Cell c = cells[idx];
+        if (c == null || c.vv == null || c.vv.getHeight() <= 0) return;
+
+        int[] vvLoc = new int[2];
+        c.vv.getLocationInWindow(vvLoc);
+        int[] pvLoc = new int[2];
+        playView.getLocationInWindow(pvLoc);
+        int vvBottom = vvLoc[1] - pvLoc[1] + c.vv.getHeight();
+
+        // 贴画面底边往上一点点
+        int clearance = playView.getHeight() - vvBottom + d(16);
+
+        // 控制条显示时不能压住它 —— 两个约束取更靠上的那个
+        if (controlsVisible && c.bottomOverlay != null && c.bottomOverlay.getHeight() > 0
+                && c.bottomOverlay.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+            FrameLayout.LayoutParams blp =
+                    (FrameLayout.LayoutParams) c.bottomOverlay.getLayoutParams();
+            clearance = Math.max(clearance,
+                    blp.bottomMargin + c.bottomOverlay.getHeight() + d(18));
+        }
+
+        if (!(subLabel.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+        FrameLayout.LayoutParams slp = (FrameLayout.LayoutParams) subLabel.getLayoutParams();
+        if (slp.bottomMargin != clearance) {
+            slp.bottomMargin = clearance;
+            subLabel.setLayoutParams(slp);
+        }
+    }
+
     /** 由 ticker 调：按当前播放位置换字幕文字。 */
     private void updateSubtitle() {
         if (!subOn || subCues.isEmpty() || subLabel == null) return;
@@ -2655,15 +3201,153 @@ public class MainActivity extends AppCompatActivity {
         } else {
             subLabel.setText(want);
             subLabel.setVisibility(View.VISIBLE);
+            layoutSubtitle();
         }
     }
 
-    /** A-B / 字幕两个键只在单视频时出现，图标随状态变。 */
+    // -------------------------------------------------- 音轨（多语言配音）
+
+    /**
+     * 音轨 / 语言选择。只在单视频时给 —— 多路各自选音轨在四宫格里没意义，
+     * 「全部出声」模式下几路放不同语言更是一团乱。
+     *
+     * `MediaPlayer.getTrackInfo()` 返回的是**所有类型**的轨道（视频/音频/字幕混在一个数组里），
+     * 下标是全局的，所以选的时候要把原下标交回 `selectTrack()` —— 不能只数音频轨的第几条。
+     */
+    private void onAudioTrackButton() {
+        int idx = gestureCell();
+        Cell c = (idx >= 0 && idx < MAX_CELLS) ? cells[idx] : null;
+        if (c == null || c.mp == null) {
+            toast("这一格还没有视频");
+            return;
+        }
+        MediaPlayer.TrackInfo[] infos;
+        try {
+            infos = c.mp.getTrackInfo();
+        } catch (Throwable t) {
+            Log.w(TAG, "取轨道信息失败", t);
+            toast("这个播放器拿不到轨道信息");
+            return;
+        }
+        if (infos == null || infos.length == 0) {
+            toast("拿不到轨道信息");
+            return;
+        }
+
+        final List<Integer> trackIdx = new ArrayList<>();
+        final List<String> labels = new ArrayList<>();
+        int ordinal = 0;
+        for (int i = 0; i < infos.length; i++) {
+            MediaPlayer.TrackInfo ti = infos[i];
+            if (ti == null) continue;
+            if (ti.getTrackType() != MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) continue;
+            ordinal++;
+            trackIdx.add(i);
+            labels.add(describeAudioTrack(ti, ordinal));
+        }
+        Log.i(TAG, "音轨 " + labels.size() + " 条: " + labels);
+
+        if (labels.isEmpty()) {
+            toast("这个视频没有音频轨（或播放器没报出来）");
+            return;
+        }
+        if (labels.size() == 1) {
+            toast("只有一条音轨：" + labels.get(0));
+            return;
+        }
+
+        int cur = selectedAudioTrack[idx];
+        if (cur < 0) cur = trackIdx.get(0);      // 没手动选过就当作播放器默认（通常是第一条）
+
+        final String[] items = new String[labels.size()];
+        int checked = 0;
+        for (int i = 0; i < labels.size(); i++) {
+            items[i] = labels.get(i);
+            if (trackIdx.get(i) == cur) checked = i;
+        }
+        final int[] map = new int[trackIdx.size()];
+        for (int i = 0; i < trackIdx.size(); i++) map[i] = trackIdx.get(i);
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("音轨")
+                .setSingleChoiceItems(items, checked, (dlg, which) -> {
+                    int track = map[which];
+                    try {
+                        c.mp.selectTrack(track);
+                        selectedAudioTrack[idx] = track;
+                        Log.i(TAG, "切到音轨 " + track + "（" + items[which] + "）");
+                        toast("已切到：" + items[which]);
+                    } catch (Throwable t) {
+                        Log.w(TAG, "切音轨失败", t);
+                        toast("切换失败：" + t.getClass().getSimpleName());
+                    }
+                    dlg.dismiss();
+                    showControls();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    /** 把一条音频轨描述成「音轨 1 · 日语 · flac · 2 声道」。 */
+    private String describeAudioTrack(MediaPlayer.TrackInfo ti, int ordinal) {
+        StringBuilder sb = new StringBuilder("音轨 ").append(ordinal);
+        String lang = "";
+        try {
+            lang = ti.getLanguage();
+        } catch (Throwable ignored) {
+        }
+        String name = langName(lang);
+        if (!name.isEmpty()) sb.append(" · ").append(name);
+        else if (lang != null && !lang.isEmpty() && !"und".equalsIgnoreCase(lang)) {
+            sb.append(" · ").append(lang);
+        }
+        try {
+            MediaFormat fmt = ti.getFormat();
+            if (fmt != null) {
+                String mime = fmt.getString(MediaFormat.KEY_MIME);
+                if (mime != null) {
+                    int slash = mime.indexOf('/');
+                    sb.append(" · ").append(slash >= 0 ? mime.substring(slash + 1) : mime);
+                }
+                if (fmt.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                    sb.append(" · ").append(fmt.getInteger(MediaFormat.KEY_CHANNEL_COUNT))
+                            .append(" 声道");
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return sb.toString();
+    }
+
+    /** ISO 639-2 三字母 → 中文。只列常见的，其余原样显示。 */
+    private static String langName(String code) {
+        if (code == null) return "";
+        switch (code.toLowerCase(java.util.Locale.ROOT)) {
+            case "jpn": return "日语";
+            case "eng": return "英语";
+            case "chi": case "zho": case "cmn": return "中文";
+            case "yue": return "粤语";
+            case "kor": return "韩语";
+            case "fra": case "fre": return "法语";
+            case "deu": case "ger": return "德语";
+            case "spa": return "西班牙语";
+            case "ita": return "意大利语";
+            case "rus": return "俄语";
+            case "por": return "葡萄牙语";
+            case "tha": return "泰语";
+            case "ara": return "阿拉伯语";
+            case "hin": return "印地语";
+            default: return "";
+        }
+    }
+
+    /** A-B / 字幕 / 音轨三个键只在单视频时出现，图标随状态变。 */
     private void syncSingleButtons() {
-        if (abButton == null || subtitleButton == null) return;
+        if (abButton == null || subtitleButton == null || languageButton == null) return;
         boolean single = singleMode();
         abButton.setVisibility(single ? View.VISIBLE : View.GONE);
         subtitleButton.setVisibility(single ? View.VISIBLE : View.GONE);
+        languageButton.setVisibility(single ? View.VISIBLE : View.GONE);
         if (!single) return;
         // A-B 三态：未设（暗）/ 只设了 A（半亮）/ 循环中（强调色）
         float alpha = (abA < 0) ? 0.5f : (abB < 0 ? 0.8f : 1f);
@@ -2671,6 +3355,11 @@ public class MainActivity extends AppCompatActivity {
         abButton.setBackground(tintCircleBg(abB > abA ? ACCENT : OVER_VIDEO_CHIP));
         subtitleButton.setAlpha(subOn ? 1f : 0.5f);
         subtitleButton.setBackground(tintCircleBg(subOn ? ACCENT : OVER_VIDEO_CHIP));
+        // 音轨键：默认（没手动选过）半亮，选过就点亮
+        int gidx = gestureCell();
+        boolean picked = gidx >= 0 && gidx < MAX_CELLS && selectedAudioTrack[gidx] >= 0;
+        languageButton.setAlpha(picked ? 1f : 0.5f);
+        languageButton.setBackground(tintCircleBg(picked ? ACCENT : OVER_VIDEO_CHIP));
     }
 
     private GradientDrawable tintCircleBg(int color) {
@@ -2886,6 +3575,7 @@ public class MainActivity extends AppCompatActivity {
         subCues.clear();
         subTexts.clear();
         subOn = false;
+        for (int i = 0; i < MAX_CELLS; i++) selectedAudioTrack[i] = -1;
         resetWindowBrightness();
 
         assignedCount = n;
@@ -3441,6 +4131,7 @@ public class MainActivity extends AppCompatActivity {
         topBar.setVisibility(View.VISIBLE);
         topBar.animate().alpha(1f).setDuration(150).start();
         updateCellChrome();
+        layoutSubtitle();          // 控制条出来了，字幕要往上让
 
         int timeout = prefs.hideTimeout();
         ui.removeCallbacks(autoHide);
@@ -3456,6 +4147,7 @@ public class MainActivity extends AppCompatActivity {
         topBar.animate().alpha(0f).setDuration(200)
                 .withEndAction(() -> topBar.setVisibility(View.GONE)).start();
         updateCellChrome();
+        layoutSubtitle();          // 控制条收了，字幕可以贴回画面底边
     }
 
     // --------------------------------------------------------------- 媒体库
@@ -3465,6 +4157,9 @@ public class MainActivity extends AppCompatActivity {
         libraryLoadStarted = true;
         pool.execute(() -> {
             final List<Item> found = new ArrayList<>();
+            // 树形目录要用到路径。API 29+ 取 RELATIVE_PATH（形如 "DCIM/Camera/"），
+            // 更老的版本没有这一列，退回已被弃用的 DATA（绝对路径）。
+            final boolean hasRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q;
             String[] proj = {
                     MediaStore.Video.Media._ID,
                     MediaStore.Video.Media.DISPLAY_NAME,
@@ -3473,6 +4168,8 @@ public class MainActivity extends AppCompatActivity {
                     MediaStore.Video.Media.DATE_ADDED,
                     MediaStore.Video.Media.BUCKET_ID,
                     MediaStore.Video.Media.BUCKET_DISPLAY_NAME,
+                    hasRelativePath ? MediaStore.Video.Media.RELATIVE_PATH
+                            : MediaStore.Video.Media.DATA,
             };
             Cursor c = null;
             try {
@@ -3488,6 +4185,8 @@ public class MainActivity extends AppCompatActivity {
                     int iDate = c.getColumnIndex(MediaStore.Video.Media.DATE_ADDED);
                     int iBucket = c.getColumnIndex(MediaStore.Video.Media.BUCKET_ID);
                     int iBucketName = c.getColumnIndex(MediaStore.Video.Media.BUCKET_DISPLAY_NAME);
+                    int iPath = hasRelativePath ? c.getColumnIndex(MediaStore.Video.Media.RELATIVE_PATH)
+                            : c.getColumnIndex(MediaStore.Video.Media.DATA);
                     while (c.moveToNext() && found.size() < 800) {
                         long id = c.getLong(iId);
                         String name = c.getString(iName);
@@ -3496,14 +4195,17 @@ public class MainActivity extends AppCompatActivity {
                         long date = iDate >= 0 ? c.getLong(iDate) : 0L;
                         long bucket = iBucket >= 0 ? c.getLong(iBucket) : 0L;
                         String bname = iBucketName >= 0 ? c.getString(iBucketName) : null;
-                        found.add(new Item(
+                        String raw = (iPath >= 0 && !c.isNull(iPath)) ? c.getString(iPath) : null;
+                        Item item = new Item(
                                 id,
                                 name == null ? "?" : name,
                                 human(size),
                                 dur,
                                 date,
                                 bucket,
-                                bname == null || bname.isEmpty() ? "未分类" : bname).withSize(size));
+                                bname == null || bname.isEmpty() ? "未分类" : bname).withSize(size);
+                        item.relDir = toRelDir(raw);
+                        found.add(item);
                     }
                 }
             } catch (Throwable t) {
