@@ -145,7 +145,7 @@ public class MainActivity extends AppCompatActivity {
     /**
      * 系统手势区在左右两侧的宽度。
      *
-     * 实测（OnePlus PJZ110 + 手势导航）：竖屏下 systemGestures 是
+     * 实测（6.7 寸、Android 15、640dpi 机型 + 手势导航）：竖屏下 systemGestures 是
      *   left  [0,0][120,3168]      ← 左边缘 120px（30dp）整条
      *   right [1320,0][1440,3168]  ← 右边缘 120px 整条
      *   bottom 高度 0（导航栏在沉浸式下已隐藏）

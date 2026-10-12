@@ -233,7 +233,7 @@ cell 的监听器就该响。可它没响，说明**画面那块区域上的触�
 - 每格独立 `setOnErrorListener`，把 `what` / `extra` 错误码直接画在格子上
 - 加了「诊断」页：读 `MEDIA_PERFORMANCE_CLASS` 与各 codec 的 `getMaxSupportedInstances()`
 
-**实测结果**：目标机（OnePlus PJZ110）上 4 路 1080p 可同时播放 ——
+**实测结果**：一台 6.7 寸、Android 15 的骁龙 8 系机型上 4 路 1080p 可同时播放 ——
 可行性报告里的 P1（Go / No-Go）关卡通过。
 
 ---
