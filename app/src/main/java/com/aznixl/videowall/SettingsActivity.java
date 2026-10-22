@@ -306,10 +306,37 @@ public class SettingsActivity extends AppCompatActivity {
                     AsrWorker.releaseAll();
                 });
 
-        choice("字幕翻译", "Whisper 的翻译任务只有「任意语言 → 英文」这一种，出不了中文。"
-                        + "要中文得另接翻译引擎（见 README 的说明）",
-                new String[]{"不翻译（原文）", "翻成英文"}, prefs.asrTranslate() ? 1 : 0,
-                i -> prefs.setAsrTranslate(i == 1));
+        choice("字幕翻译",
+                "「英文」用 Whisper 自带翻译，离线但只能出英文（它的预训练任务固定如此）；"
+                        + "「中文」走在线接口，需要在下面填端点",
+                new String[]{"不翻译（原文）", "英文（离线，Whisper 内置）", "中文（在线接口）"},
+                prefs.asrTranslateMode(),
+                i -> {
+                    prefs.setAsrTranslateMode(i);
+                    rebuildItems();
+                });
+
+        textInput("翻译接口地址", "OpenAI 兼容的 base URL，例如 https://api.deepseek.com/v1",
+                prefs.trBase(), v -> {
+                    prefs.setTrBase(v);
+                    rebuildItems();
+                });
+
+        textInput("翻译接口密钥", "只存在本应用的私有偏好里，只用于这条请求",
+                prefs.trKey(), v -> {
+                    prefs.setTrKey(v);
+                    rebuildItems();
+                });
+
+        textInput("翻译接口模型名", "填端点要求的模型标识，例如 deepseek-chat / qwen-plus",
+                prefs.trModel(), v -> {
+                    prefs.setTrModel(v.trim());
+                    rebuildItems();
+                });
+
+        row("隐私提示",
+                "选「中文（在线）」时，识别出的字幕文本会被发到上面那个接口地址。"
+                        + "不想让文本出设备，就用「原文」或「英文（离线）」");
 
         choice("推理线程数", "4 是稳妥值。调高收益递减，还会跟视频解码抢大核",
                 ASR_THREADS, asrThreadIndex(), i -> prefs.setAsrThreads(Integer.parseInt(ASR_THREADS[i])));
@@ -732,6 +759,45 @@ public class SettingsActivity extends AppCompatActivity {
             copyToClipboard(url);
             toast("没有可用浏览器，链接已复制");
         }
+    }
+
+    /** 一行可编辑文本：点开弹一个输入框。 */
+    private void textInput(String title, String desc, String value, OnText onChange) {
+        LinearLayout r = row(title, desc);
+        TextView v = new TextView(this);
+        v.setTextColor(VALUE);
+        v.setTextSize(13);
+        v.setMaxLines(1);
+        v.setEllipsize(android.text.TextUtils.TruncateAt.MIDDLE);
+        v.setText(value == null || value.isEmpty() ? "未设置" : value);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2);
+        r.addView(v, lp);
+
+        TextView arrow = new TextView(this);
+        arrow.setText("  ›");
+        arrow.setTextColor(MUTED);
+        arrow.setTextSize(15);
+        r.addView(arrow);
+
+        r.setOnClickListener(view -> {
+            android.widget.EditText input = new android.widget.EditText(this);
+            input.setText(value == null ? "" : value);
+            input.setSelectAllOnFocus(true);
+            input.setTextSize(14);
+            int pad = d(16);
+            input.setPadding(pad, pad, pad, pad);
+
+            new MaterialAlertDialogBuilder(this)
+                    .setTitle(title)
+                    .setView(input)
+                    .setPositiveButton("保存", (dlg, w) -> onChange.on(input.getText().toString()))
+                    .setNegativeButton("取消", null)
+                    .show();
+        });
+    }
+
+    private interface OnText {
+        void on(String value);
     }
 
     private void switchItem(String title, String desc, boolean value, OnBool onChange) {

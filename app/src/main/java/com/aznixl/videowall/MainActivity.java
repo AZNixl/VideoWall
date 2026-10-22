@@ -60,6 +60,7 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 import com.aznixl.videowall.asr.AsrModels;
 import com.aznixl.videowall.asr.AsrWorker;
+import com.aznixl.videowall.asr.Translator;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -3122,21 +3123,25 @@ public class MainActivity extends AppCompatActivity {
             syncAsrInfo.run();
         }));
 
-        // 翻译档位。Whisper 的 translate 任务是固定的「任意语言 → 英文」，
-        // 没有"翻成中文"这个选项，所以界面上只有两档，别让人误以为能出中文。
+        // 翻译档位。Whisper 自带的那档只能出英文；要中文得走在线接口。
         box.addView(browseSection("翻译"));
         box.addView(chipRow(new RowState() {
             @Override
             public String[] labels() {
-                return new String[]{"原文", "英文（Whisper 内置，只能出英文）"};
+                return new String[]{"原文", "英文（离线）", "中文（在线）"};
             }
 
             @Override
             public int selected() {
-                return prefs.asrTranslate() ? 1 : 0;
+                return prefs.asrTranslateMode();
             }
         }, i -> {
-            prefs.setAsrTranslate(i == 1);
+            prefs.setAsrTranslateMode(i);
+            if (i == Prefs.TR_API
+                    && !new Translator(prefs.trBase(), prefs.trKey(),
+                    prefs.trModel(), prefs.trTarget()).isConfigured()) {
+                toast("先去「设置 → 实时字幕 → 翻译接口」填端点和密钥");
+            }
             // 翻译方式变了必须重跑，已出的字幕作废
             stopAsr();
             syncAsr();
@@ -3531,7 +3536,10 @@ public class MainActivity extends AppCompatActivity {
         long from = mpPosition(c);
         Uri uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, c.videoId);
         asrWorker = new AsrWorker(this, uri, model.file,
-                prefs.asrLanguage(), prefs.asrTranslate(), prefs.asrThreads(), asrListener);
+                prefs.asrLanguage(),
+                prefs.asrTranslateMode() == Prefs.TR_WHISPER_EN,
+                buildTranslator(),
+                prefs.asrThreads(), asrListener);
         asrWorker.start(from);
         Log.i(TAG, "ASR 启动: " + model.name + " @ " + from + "ms");
         applySubtitleSize();
@@ -3553,6 +3561,18 @@ public class MainActivity extends AppCompatActivity {
 
     private int asrLangIndex() {
         return AsrModels.langIndex(prefs.asrLanguage());
+    }
+
+    /** 在线翻译器。只在 TR_API 模式下返回非 null；没配好端点/密钥就返回 null（保持原文）。 */
+    private Translator buildTranslator() {
+        if (prefs.asrTranslateMode() != Prefs.TR_API) return null;
+        Translator t = new Translator(prefs.trBase(), prefs.trKey(),
+                prefs.trModel(), prefs.trTarget());
+        if (!t.isConfigured()) {
+            toast("翻译接口还没配好（设置 → 实时字幕 → 翻译接口）");
+            return null;
+        }
+        return t;
     }
 
     /** 当前实际会用的模型名（没显式选过就是扫到的第一个）。 */

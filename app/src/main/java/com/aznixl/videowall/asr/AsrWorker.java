@@ -60,7 +60,10 @@ public final class AsrWorker {
     private final Uri uri;
     private final File modelFile;
     private final String language;
+    /** Whisper 内置翻译（只能出英文）。 */
     private final boolean translate;
+    /** 在线翻译（可以出中文）。null = 不翻。 */
+    private final Translator translator;
     private final int threads;
     private final Listener listener;
 
@@ -70,12 +73,13 @@ public final class AsrWorker {
     private Thread thread;
 
     public AsrWorker(Context ctx, Uri uri, File modelFile, String language, boolean translate,
-                     int threads, Listener listener) {
+                     Translator translator, int threads, Listener listener) {
         this.appCtx = ctx.getApplicationContext();
         this.uri = uri;
         this.modelFile = modelFile;
         this.language = language == null ? "auto" : language;
         this.translate = translate;
+        this.translator = translator;
         this.threads = Math.max(1, threads);
         this.listener = listener;
     }
@@ -210,7 +214,10 @@ public final class AsrWorker {
                     lastText = text;
                     out.add(new Cue(thisStart + t[0], thisStart + t[1], text));
                 }
-                if (!out.isEmpty()) listener.onCues(out);
+                if (!out.isEmpty()) {
+                    translateChunk(out);
+                    listener.onCues(out);
+                }
 
                 listener.onStatus("已识别到 " + fmtMs(chunkStartMs));
 
@@ -222,6 +229,48 @@ public final class AsrWorker {
             listener.onError(String.valueOf(t.getMessage()));
         } finally {
             if (pump != null) pump.close();
+        }
+    }
+
+    /**
+     * 把这一块的字幕翻成中文（就地改 {@code out} 里的文本）。
+     *
+     * <p>为什么**整块一次请求**而不是逐句请求：一块 8 秒通常出 2–5 句，
+     * 逐句就是 2–5 次 HTTP，每次约 1 秒 —— 加起来就跟不上播放了。
+     * 整块拼成多行发一次，回来按行拆；如果模型把行数弄乱了（合并/拆句），
+     * 就把整段译文合成一条字幕挂在块首尾，至少内容不丢。
+     *
+     * <p>翻译失败时**保留原文**，绝不让网络问题把字幕搞没。
+     */
+    private void translateChunk(List<Cue> out) {
+        if (translator == null || out.isEmpty()) return;
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < out.size(); i++) {
+            if (i > 0) sb.append('\n');
+            sb.append(out.get(i).text);
+        }
+        long t0 = System.currentTimeMillis();
+        String tr = translator.translate(sb.toString());
+        long cost = System.currentTimeMillis() - t0;
+        Log.i(TAG, "翻译 " + out.size() + " 句耗时 " + cost + "ms");
+
+        if (tr == null || tr.equals(sb.toString())) return;   // 没翻成（回落原文了）
+
+        String[] parts = tr.split("\\r?\\n");
+        if (parts.length == out.size()) {
+            for (int i = 0; i < out.size(); i++) {
+                String line = parts[i].trim();
+                if (line.isEmpty()) continue;
+                Cue c = out.get(i);
+                out.set(i, new Cue(c.startMs, c.endMs, line));
+            }
+        } else {
+            // 行数对不上：整段并成一条
+            long s = out.get(0).startMs;
+            long e = out.get(out.size() - 1).endMs;
+            out.clear();
+            out.add(new Cue(s, e, tr.replace('\n', ' ').trim()));
         }
     }
 

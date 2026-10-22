@@ -347,17 +347,66 @@ public final class Prefs {
     }
 
     /**
-     * 是否让 Whisper 直接翻译成英文。
+     * 字幕翻译模式。
      *
-     * <p><b>只能出英文</b>：Whisper 的 translate 任务是 hard-code 的「任意语言 → 英文」，
-     * 它的预训练目标就这么定的，没有"翻成中文"这个选项。要中文得另接翻译引擎。
+     * <ul>
+     *   <li>0 = 原文</li>
+     *   <li>1 = Whisper 翻成英文（离线，只能出英文 —— 它的 translate 任务固定成这样）</li>
+     *   <li>2 = 走在线 API 翻成中文（OpenAI 兼容端点，用户自己填）</li>
+     * </ul>
      */
-    public boolean asrTranslate() {
-        return sp.getBoolean("asrTranslate", false);
+    public static final int TR_NONE = 0;
+    public static final int TR_WHISPER_EN = 1;
+    public static final int TR_API = 2;
+
+    public int asrTranslateMode() {
+        int v = sp.getInt("asrTrMode", TR_NONE);
+        return (v >= 0 && v <= 2) ? v : TR_NONE;
     }
 
-    public void setAsrTranslate(boolean v) {
-        sp.edit().putBoolean("asrTranslate", v).apply();
+    public void setAsrTranslateMode(int v) {
+        sp.edit().putInt("asrTrMode", Math.max(0, Math.min(2, v))).apply();
+    }
+
+    // ---- 在线翻译接口（OpenAI 兼容）
+
+    public String trBase() {
+        return nz(sp.getString("trBase", ""));
+    }
+
+    public void setTrBase(String v) {
+        sp.edit().putString("trBase", v == null ? "" : v.trim()).apply();
+    }
+
+    public String trKey() {
+        return nz(sp.getString("trKey", ""));
+    }
+
+    public void setTrKey(String v) {
+        sp.edit().putString("trKey", v == null ? "" : v.trim()).apply();
+    }
+
+    public String trModel() {
+        String s = sp.getString("trModel", "");
+        return nz(s).isEmpty() ? "gpt-4o-mini" : s.trim();
+    }
+
+    public void setTrModel(String v) {
+        sp.edit().putString("trModel", v == null ? "" : v.trim()).apply();
+    }
+
+    /** 目标语言。目前只暴露"简体中文"，留着这个字段方便以后加。 */
+    public String trTarget() {
+        String s = sp.getString("trTarget", "简体中文");
+        return nz(s).isEmpty() ? "简体中文" : s.trim();
+    }
+
+    public void setTrTarget(String v) {
+        sp.edit().putString("trTarget", v == null ? "简体中文" : v.trim()).apply();
+    }
+
+    private static String nz(String s) {
+        return s == null ? "" : s;
     }
 
     // ---- 字幕
