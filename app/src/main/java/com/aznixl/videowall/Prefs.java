@@ -306,6 +306,60 @@ public final class Prefs {
         sp.edit().putInt("browseMode", v).apply();
     }
 
+    // ---- 语音识别（实时字幕）
+
+    public boolean asrEnabled() {
+        return sp.getBoolean("asrEnabled", false);
+    }
+
+    public void setAsrEnabled(boolean v) {
+        sp.edit().putBoolean("asrEnabled", v).apply();
+    }
+
+    /** 选中的模型名（{@code AsrModels.Model.name}）。空串 = 用扫到的第一个。 */
+    public String asrModel() {
+        String s = sp.getString("asrModel", "");
+        return s == null ? "" : s;
+    }
+
+    public void setAsrModel(String v) {
+        sp.edit().putString("asrModel", v == null ? "" : v).apply();
+    }
+
+    /** Whisper 语言码；"auto" 让它自己判断。 */
+    public String asrLanguage() {
+        String s = sp.getString("asrLang", "auto");
+        return s == null || s.isEmpty() ? "auto" : s;
+    }
+
+    public void setAsrLanguage(String v) {
+        sp.edit().putString("asrLang", v == null ? "auto" : v).apply();
+    }
+
+    /** 推理线程数。手机上 4 是个稳妥值：再多收益递减，还会跟视频解码抢核。 */
+    public int asrThreads() {
+        int v = sp.getInt("asrThreads", 4);
+        return Math.max(1, Math.min(8, v));
+    }
+
+    public void setAsrThreads(int v) {
+        sp.edit().putInt("asrThreads", Math.max(1, Math.min(8, v))).apply();
+    }
+
+    /**
+     * 是否让 Whisper 直接翻译成英文。
+     *
+     * <p><b>只能出英文</b>：Whisper 的 translate 任务是 hard-code 的「任意语言 → 英文」，
+     * 它的预训练目标就这么定的，没有"翻成中文"这个选项。要中文得另接翻译引擎。
+     */
+    public boolean asrTranslate() {
+        return sp.getBoolean("asrTranslate", false);
+    }
+
+    public void setAsrTranslate(boolean v) {
+        sp.edit().putBoolean("asrTranslate", v).apply();
+    }
+
     // ---- 字幕
 
     /** 字幕文字大小（sp）。 */

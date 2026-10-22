@@ -8,6 +8,84 @@
 
 ---
 
+## v3.2 — 实时语音字幕（Whisper 本地识别）
+
+单视频播放时，边看边出字幕 —— 不需要字幕文件，用 Whisper 在你手机上离线识别音轨。
+
+### 为什么不引入现成依赖（两次试错记在这里）
+
+| 方案 | 结果 |
+|---|---|
+| `com.bihe0832.android:lib-sherpa-onnx`（AAR） | 能用，API 也验证过（`OfflineRecognizer(null, cfg)` 走 `newFromFile`，支持绝对路径）。但它传递依赖 `libonnxruntime.so`，每个 ABI 15–17MB，**APK 从 5.4MB 涨到 85MB** ✗ |
+| `io.github.givimad:whisper-jni` | 只带 debian / macos / win 的动态库（glibc 编的），安卓 bionic 加载不了 ✗ |
+| **自己用 NDK 编 whisper.cpp** | 产物 **2.8MB**（arm64 1.64MB + v7a 1.17MB），而且吃的是 whisper.cpp 原生 ggml 模型 ✓ |
+
+所以走第三条：源码和构建说明在 `tools/whisper-jni/`，产物提交在 `app/src/main/jniLibs/`。
+**CI 因此不需要 NDK**（预编译的 .so 直接打包）。
+
+### 核心设计：让识别跑在播放头前面
+
+通常的实时字幕是麦克风那套，字幕必然滞后。但这里音频来自文件，可以随便往前读。
+所以反过来做：**始终比播放头多转录 60 秒**，等你看那句话时字幕早就躺好了。
+实测 8 秒音频识别耗 1.45–1.6 秒（约 **5.5 倍实时**），领先 60 秒绰绰有余。
+除了刚 seek 完那一两秒，基本感觉不到延迟。
+
+没有字幕文件时的另一个好处：它天然复用 v3.1 做的字幕渲染层（同一个 `subLabel`），
+字号、位置、开关全都照旧能用。
+
+### 分块为什么找静音点
+
+Whisper 是非流式的，只能一块块吃（8 秒一块）。硬切在固定边界会把词切成两半
+（"我今天去" / "了超市"）。所以在目标边界前 2.5 秒内找能量最低的 100ms 窗口当切点，
+切口落在换气处。实测切点常常落在 5.7s / 6.3s / 7.6s 这种非整数位置 ✓ 说明静音检测确实在起作用。
+
+### 模型放哪：`/sdcard/Android/media/com.aznixl.videowall/asr/`
+
+这是唯一同时满足"**文件管理器能直接进出**、真路径、**零权限**"的位置：
+
+| 位置 | 问题 |
+|---|---|
+| `Android/data/<包名>` | 安卓 11+ 文件管理器进不去，用户没法自己放文件 ✗ |
+| `Download/` | 要「所有文件访问」权限，为一个模型不值当 ✗ |
+| **`Android/media/<包名>`** | 应用有完整路径权限，文件管理器也能直接读写 ✓（WhatsApp 那类可见目录就是这么来的）|
+
+whisper.cpp 的 C++ 侧是 `fopen` 打开的，只认真实路径 —— SAF 的 `content://` 喂不进去，
+所以不能直接让用户选文件夹。目录在应用启动时就建好，用户下完 `.bin` 丢进去即可。
+
+### 设置入口
+
+- **设置页 → 实时字幕**：开关、模型选择、识别语言、线程数、导入模型、复制目录路径、推荐模型清单（带 hf-mirror 直链）
+- **播放页 → 字幕弹窗**：同样的开关 / 模型 / 语言 / 翻译档位，改完立刻生效，不用退出重进
+
+### 字幕翻译
+
+Whisper 自带的 `translate` 任务**只能输出英文**（预训练目标就是"任意语言 → 英文"，
+没有"翻成中文"这个选项）。所以界面上只有「原文 / 英文」两档，且标注得很明确 ——
+不让用户误以为能出中文。中文翻译要另接翻译引擎，见 README「已知边界」。
+
+### 真机验证
+
+| 步骤 | 证据 |
+|---|---|
+| 模型加载（JNI） | `WhisperJni: 模型已加载: /storage/emulated/0/Android/media/com.aznixl.videowall/asr/ggml-tiny-q5_1.bin` |
+| 音轨识别 | `AsrAudioPump: 音频轨 audio/flac 已就绪` |
+| 解码格式 | `AsrAudioPump: 解码格式: 48000 Hz / 2 ch / int16` |
+| 重采样产出 | `AsrAudioPump: 已产出 5/10/…/60 秒音频（48000Hz→16k, 2ch）` |
+| 推理 | `AsrWorker: 本块 8000ms 音频，识别耗时 1451ms，段落 3` |
+
+### 踩到的四个坑
+
+1. **JNI 符号名按 Java 方法名生成**。C++ 写的是 `..._nativeInit`，Java 却声明 `init()`
+   —— 编译一点问题没有，一跑就 `UnsatisfiedLinkError`。已对齐成 `nativeInit/nativeFull/nativeFree`。
+2. **`MediaCodec.flush()` 之后不能再 `start()`**，否则抛
+   `start() is valid only at Configured state; currently in Running state`。
+3. **`adb shell mkdir` 建的目录属主是 shell**，应用看得见路径却读不了
+   （`listFiles()` 返回 null），上层会安静地判成"没有模型"。已在 `scan()` 里加了告警日志。
+4. **别用 PowerShell 的 `Set-Content -Encoding utf8` 改源码**：PS 5.1 会写 BOM 并把中文按 ANSI 读坏，
+   整个文件变乱码。改源码只用编辑器/专用工具。
+
+---
+
 ## v3.1 — 单视频手势 / A-B / 字幕 / 音轨选择 / 浏览模式 / 下拉刷新
 
 这一天早上的改动统一算这一版。

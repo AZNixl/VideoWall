@@ -58,6 +58,9 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
+import com.aznixl.videowall.asr.AsrModels;
+import com.aznixl.videowall.asr.AsrWorker;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -230,6 +233,16 @@ public class MainActivity extends AppCompatActivity {
     private final int[] selectedAudioTrack = {-1, -1, -1, -1};
     private AudioManager audioManager;
 
+    // ---- 语音识别（实时字幕）。只在单视频时用。
+    private AsrWorker asrWorker;
+    /** 识别出来的字幕，按时间累积。所有写操作都在 UI 线程（见 asrListener）。 */
+    private final List<AsrWorker.Cue> asrCues = new ArrayList<>();
+    /** 正在用识别结果的那一格是哪个视频；换了视频就重起。 */
+    private long asrForVideoId = -1;
+    private String asrStatus = "";
+    /** 改写 nameLabel 前存下的原文，停识别时还原。 */
+    private String asrSavedLabel;
+
     /** 手势提示浮层（调亮度/音量时中间弹一下）。 */
     private TextView gestureHud;
     private float gStartY;
@@ -400,6 +413,9 @@ public class MainActivity extends AppCompatActivity {
         dp = getResources().getDisplayMetrics().density;
         prefs = new Prefs(this);
         applyPalette();
+        // 启动就把识别模型目录建出来。放在 Android/media 下，文件管理器能直接读写，
+        // 用户下完 .bin 丢进去即可 —— 但目录得先存在，否则用户找不到该往哪儿放。
+        AsrModels.rootDir(this);
         buildRoot();
 
         if (!prefs.onboarded()) {
@@ -1284,7 +1300,7 @@ public class MainActivity extends AppCompatActivity {
      * 才反映得出来，实测不稳（表现为"选完没变，关掉重开才看到"）。
      * 原地 setTextColor/setBackground 只触发重绘，不依赖布局流程。
      */
-    private LinearLayout chipRow(RowState state, OnPick onPick) {
+    private View chipRow(RowState state, OnPick onPick) {
         String[] labels = state.labels();
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -1306,7 +1322,13 @@ public class MainActivity extends AppCompatActivity {
             row.addView(chip);
         }
         restyleChips(chips, state);
-        return row;
+
+        // 套一层横向滚动：模型名可能很长（ggml-tiny-q5_1 这种），
+        // 直接铺开在手机上会溢出屏幕，右边的选项就点不到了。
+        HorizontalScrollView sc = new HorizontalScrollView(this);
+        sc.setHorizontalScrollBarEnabled(false);
+        sc.addView(row);
+        return sc;
     }
 
     /** 按当前状态给这一行的胶囊上色 / 换字。只改属性，不增删 View。 */
@@ -3008,6 +3030,119 @@ public class MainActivity extends AppCompatActivity {
             }
         }));
 
+        // ---------------- 实时字幕（语音识别）
+        box.addView(browseSection("实时字幕（语音识别）"));
+
+        final TextView asrInfo = new TextView(this);
+        asrInfo.setTextColor(MUTED);
+        asrInfo.setTextSize(11);
+        final List<AsrModels.Model> asrModels = AsrModels.scan(this);
+        Runnable syncAsrInfo = () -> {
+            String line;
+            if (asrModels.isEmpty()) {
+                line = "没找到模型。用文件管理器把 .bin 放到 " + AsrModels.pathForDisplay(this);
+            } else if (!prefs.asrEnabled()) {
+                line = "已关闭 · 当前模型 " + currentAsrModelName();
+            } else {
+                String st = asrStatus.isEmpty() ? "已开启" : asrStatus;
+                line = st + " · 已出 " + asrCues.size() + " 条";
+            }
+            asrInfo.setText(line);
+        };
+        syncAsrInfo.run();
+        box.addView(asrInfo);
+
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"开启", "关闭"};
+            }
+
+            @Override
+            public int selected() {
+                return prefs.asrEnabled() ? 0 : 1;
+            }
+        }, i -> {
+            prefs.setAsrEnabled(i == 0);
+            // 立刻生效 —— 不用退出播放页再进来
+            stopAsr();
+            if (i == 0) AsrWorker.releaseAll();
+            syncAsr();
+            syncAsrInfo.run();
+            if (i == 0 && asrModels.isEmpty()) {
+                toast("还没有识别模型，先去「设置 → 实时字幕」导入或放好 .bin");
+            }
+        }));
+
+        if (!asrModels.isEmpty()) {
+            box.addView(chipRow(new RowState() {
+                @Override
+                public String[] labels() {
+                    List<AsrModels.Model> ms = AsrModels.scan(MainActivity.this);
+                    String[] out = new String[ms.size()];
+                    for (int i = 0; i < ms.size(); i++) out[i] = shortModelName(ms.get(i).name);
+                    return out;
+                }
+
+                @Override
+                public int selected() {
+                    List<AsrModels.Model> ms = AsrModels.scan(MainActivity.this);
+                    String cur = currentAsrModelName();
+                    for (int i = 0; i < ms.size(); i++) {
+                        if (ms.get(i).name.equals(cur)) return i;
+                    }
+                    return 0;
+                }
+            }, i -> {
+                List<AsrModels.Model> ms = AsrModels.scan(MainActivity.this);
+                if (i >= 0 && i < ms.size()) prefs.setAsrModel(ms.get(i).name);
+                // 换模型必须放掉旧上下文，否则内存里会压着两套权重
+                AsrWorker.releaseAll();
+                stopAsr();
+                syncAsr();
+                syncAsrInfo.run();
+            }));
+        }
+
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return AsrModels.LANG_NAMES;
+            }
+
+            @Override
+            public int selected() {
+                return asrLangIndex();
+            }
+        }, i -> {
+            prefs.setAsrLanguage(AsrModels.LANGS[i]);
+            AsrWorker.releaseAll();
+            stopAsr();
+            syncAsr();
+            syncAsrInfo.run();
+        }));
+
+        // 翻译档位。Whisper 的 translate 任务是固定的「任意语言 → 英文」，
+        // 没有"翻成中文"这个选项，所以界面上只有两档，别让人误以为能出中文。
+        box.addView(browseSection("翻译"));
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"原文", "英文（Whisper 内置，只能出英文）"};
+            }
+
+            @Override
+            public int selected() {
+                return prefs.asrTranslate() ? 1 : 0;
+            }
+        }, i -> {
+            prefs.setAsrTranslate(i == 1);
+            // 翻译方式变了必须重跑，已出的字幕作废
+            stopAsr();
+            syncAsr();
+            syncAsrInfo.run();
+        }));
+
         TextView hint = new TextView(this);
         hint.setTextColor(MUTED);
         hint.setTextSize(11);
@@ -3181,21 +3316,35 @@ public class MainActivity extends AppCompatActivity {
 
     /** 由 ticker 调：按当前播放位置换字幕文字。 */
     private void updateSubtitle() {
-        if (!subOn || subCues.isEmpty() || subLabel == null) return;
+        if (!subOn || subLabel == null) return;
         int idx = gestureCell();
         if (idx < 0 || idx >= MAX_CELLS) return;
         Cell c = cells[idx];
         if (c == null || c.mp == null) return;
         if (!singleMode()) return;
         long pos = mpPosition(c);
+
         String want = null;
-        for (int i = 0; i < subCues.size(); i++) {
-            long[] r = subCues.get(i);
-            if (pos >= r[0] && pos < r[1]) {
-                want = subTexts.get(i);
-                break;
+
+        // 有外挂/手选字幕就用它 —— 用户提供的永远优先于机器识别
+        if (!subCues.isEmpty()) {
+            for (int i = 0; i < subCues.size(); i++) {
+                long[] r = subCues.get(i);
+                if (pos >= r[0] && pos < r[1]) {
+                    want = subTexts.get(i);
+                    break;
+                }
+            }
+        } else if (!asrCues.isEmpty()) {
+            // 语音识别的结果。它是一段一段追加的，按时间找一下。
+            for (AsrWorker.Cue cue : asrCues) {
+                if (pos >= cue.startMs && pos < cue.endMs) {
+                    want = cue.text;
+                    break;
+                }
             }
         }
+
         if (want == null) {
             subLabel.setVisibility(View.GONE);
         } else {
@@ -3339,6 +3488,138 @@ public class MainActivity extends AppCompatActivity {
             case "hin": return "印地语";
             default: return "";
         }
+    }
+
+    // -------------------------------------------------- 语音识别（实时字幕）
+
+    /**
+     * 按当前状态决定识别线程该起还是该停。
+     *
+     * <p>只有"单视频 + 开了开关 + 找到了模型"才起。多路时一律停 ——
+     * 四路同时跑 ASR 在手机上不现实（Whisper 一轮就吃满 4 个大核）。
+     */
+    private void syncAsr() {
+        int idx = gestureCell();
+        Cell c = (idx >= 0 && idx < MAX_CELLS) ? cells[idx] : null;
+        boolean want = singleMode() && prefs.asrEnabled() && c != null && c.mp != null;
+        Log.i(TAG, "syncAsr: single=" + singleMode() + " enabled=" + prefs.asrEnabled()
+                + " cell=" + (c != null) + " mp=" + (c != null && c.mp != null)
+                + " running=" + (asrWorker != null));
+
+        if (!want) {
+            stopAsr();
+            return;
+        }
+        // 已经在为同一个视频跑了，别动（否则每次切排布都重新加载模型）
+        if (asrWorker != null && asrForVideoId == c.videoId) return;
+
+        AsrModels.Model model = prefs.asrModel().isEmpty()
+                ? AsrModels.first(this)
+                : AsrModels.find(this, prefs.asrModel());
+        Log.i(TAG, "syncAsr: 模型=" + (model == null ? "无" : model.name));
+        if (model == null) {
+            stopAsr();
+            asrStatus = "没找到识别模型";
+            return;
+        }
+
+        stopAsr();
+        asrCues.clear();
+        subOn = true;                       // 识别出的字幕也走同一个字幕层
+        asrForVideoId = c.videoId;
+        asrStatus = "准备中…";
+        long from = mpPosition(c);
+        Uri uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, c.videoId);
+        asrWorker = new AsrWorker(this, uri, model.file,
+                prefs.asrLanguage(), prefs.asrTranslate(), prefs.asrThreads(), asrListener);
+        asrWorker.start(from);
+        Log.i(TAG, "ASR 启动: " + model.name + " @ " + from + "ms");
+        applySubtitleSize();
+    }
+
+    private void stopAsr() {
+        if (asrWorker != null) {
+            asrWorker.stop();
+            asrWorker = null;
+        }
+        asrForVideoId = -1;
+        restoreAsrLabel();
+        if (!asrCues.isEmpty()) {
+            asrCues.clear();
+            if (subLabel != null && subCues.isEmpty()) subLabel.setVisibility(View.GONE);
+        }
+        asrStatus = "";
+    }
+
+    private int asrLangIndex() {
+        return AsrModels.langIndex(prefs.asrLanguage());
+    }
+
+    /** 当前实际会用的模型名（没显式选过就是扫到的第一个）。 */
+    private String currentAsrModelName() {
+        List<AsrModels.Model> ms = AsrModels.scan(this);
+        if (ms.isEmpty()) return "";
+        String want = prefs.asrModel();
+        if (!want.isEmpty()) {
+            for (AsrModels.Model m : ms) {
+                if (m.name.equals(want)) return m.name;
+            }
+        }
+        return ms.get(0).name;
+    }
+
+    private static String shortModelName(String n) {
+        return AsrModels.shortName(n);
+    }
+
+    /** 识别线程的回调。一律转回 UI 线程再动状态。 */
+    private final AsrWorker.Listener asrListener = new AsrWorker.Listener() {
+        @Override
+        public void onCues(List<AsrWorker.Cue> cues) {
+            ui.post(() -> {
+                asrCues.addAll(cues);
+                updateSubtitle();
+            });
+        }
+
+        @Override
+        public void onStatus(String status) {
+            ui.post(() -> {
+                asrStatus = status;
+                showAsrStatusOnLabel();
+            });
+        }
+
+        @Override
+        public void onError(String message) {
+            ui.post(() -> {
+                asrStatus = "识别出错：" + message;
+                toast(asrStatus);
+                showAsrStatusOnLabel();
+            });
+        }
+    };
+
+    /**
+     * 把识别进度挂到格子已有的信息行上，不新加控件。
+     * 第一次改写前先把原文存在 {@link #asrSavedLabel}，停掉时还原。
+     */
+    private void showAsrStatusOnLabel() {
+        int idx = gestureCell();
+        if (idx < 0 || idx >= MAX_CELLS) return;
+        Cell c = cells[idx];
+        if (c == null) return;
+        if (asrSavedLabel == null) asrSavedLabel = c.nameLabel.getText().toString();
+        c.nameLabel.setText(asrSavedLabel + "  ·  ASR " + asrStatus);
+    }
+
+    private void restoreAsrLabel() {
+        if (asrSavedLabel == null) return;
+        int idx = gestureCell();
+        if (idx >= 0 && idx < MAX_CELLS && cells[idx] != null) {
+            cells[idx].nameLabel.setText(asrSavedLabel);
+        }
+        asrSavedLabel = null;
     }
 
     /** A-B / 字幕 / 音轨三个键只在单视频时出现，图标随状态变。 */
@@ -3526,8 +3807,10 @@ public class MainActivity extends AppCompatActivity {
             layoutButton.setImageResource(prefs.layoutMode() == Prefs.LAYOUT_ROW
                     ? R.drawable.ic_view_list : R.drawable.ic_view_grid);
         }
-        // A-B / 字幕两个键的显隐也随排布变（只有单视频时出现）
+        // A-B / 字幕 / 音轨三个键的显隐也随排布变（只有单视频时出现）
         syncSingleButtons();
+        // 排布 / 放大变了 —— 识别线程该起还是该停也跟着变
+        syncAsr();
     }
 
     // ------------------------------------------------------------ 播放流程
@@ -3859,6 +4142,7 @@ public class MainActivity extends AppCompatActivity {
     private void exitPlayMode() {
         playing = false;
         zoomed = -1;
+        stopAsr();
         abA = -1;
         abB = -1;
         subCues.clear();
@@ -3926,6 +4210,9 @@ public class MainActivity extends AppCompatActivity {
             if (prefs.autoPlay()) mpStart(c);
             updateCellChrome();
             Log.i(TAG, "cell " + index + " 就绪: " + c.name + " dur=" + mpDuration(c));
+            // 播放器到这一刻才算真的有了 —— 识别线程要等到这里才能起。
+            // （applyLayoutMode 里那次 syncAsr 跑得太早，c.mp 还是 null）
+            syncAsr();
         });
         c.vv.setVideoURI(it.uri());
     }
@@ -4120,6 +4407,13 @@ public class MainActivity extends AppCompatActivity {
         for (Cell c : cells) {
             if (c == null || c.mp == null) continue;
             if (!c.userSeeking) c.sb.setProgress(mpPosition(c));
+        }
+        // 把播放头喂给识别线程 —— 它靠这个决定"领先多少"以及是否该 seek 重来
+        if (asrWorker != null) {
+            int ai = gestureCell();
+            if (ai >= 0 && ai < MAX_CELLS && cells[ai] != null && cells[ai].mp != null) {
+                asrWorker.onPlayhead(mpPosition(cells[ai]));
+            }
         }
         enforceAbLoop();
         updateSubtitle();

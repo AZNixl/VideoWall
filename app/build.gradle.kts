@@ -14,9 +14,8 @@ android {
         applicationId = "com.aznixl.videowall"
         minSdk = 24
         targetSdk = 36
-        // versionCode 必须比上一次发布的 22 大，否则装不上（覆盖安装要求 code 递增）
-        versionCode = 23
-        versionName = "3.1"
+        versionCode = 24
+        versionName = "3.2"
     }
 
     // 发布签名。
@@ -102,4 +101,15 @@ dependencies {
 
     // 首页下拉刷新。Material 里没有等价组件，只能单独引一个。
     implementation("androidx.swiperefreshlayout:swiperefreshlayout:1.1.0")
+
+    // 语音识别（实时字幕）不需要 Maven 依赖 —— 用的是自己编的 whisper.cpp。
+    //
+    // 走过两条弯路，记在这里免得以后重复踩：
+    //   ① sherpa-onnx 的 AAR（com.bihe0832.android:lib-sherpa-onnx）能用、
+    //      API 也验证过（OfflineRecognizer(null, cfg) 走 newFromFile，支持绝对路径），
+    //      但它传递依赖 libonnxruntime.so，每个 ABI 15–17MB，**APK 从 5.4MB 涨到 85MB** ✗
+    //   ② io.github.givimad:whisper-jni 只有 debian/macos/win 的动态库（glibc 编的），
+    //      安卓的 bionic 加载不了 ✗
+    // 所以自己用 NDK 编 whisper.cpp，产物只有 2.8MB（两个 ABI 合计），
+    // 放在 app/src/main/jniLibs/ 下。源码与构建说明见 tools/whisper-jni/。
 }

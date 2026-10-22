@@ -2,6 +2,7 @@ package com.aznixl.videowall;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.database.Cursor;
@@ -14,6 +15,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.MediaStore;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowInsets;
@@ -26,6 +28,8 @@ import android.widget.Toast;
 import androidx.appcompat.app.AppCompatDelegate;
 import androidx.appcompat.app.AppCompatActivity;
 
+import com.aznixl.videowall.asr.AsrModels;
+import com.aznixl.videowall.asr.AsrWorker;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.materialswitch.MaterialSwitch;
 
@@ -263,6 +267,69 @@ public class SettingsActivity extends AppCompatActivity {
 
         switchItem("记住上次选的视频", "下次进入时自动回填上次那 4 个",
                 prefs.rememberPick(), prefs::setRememberPick);
+
+        section("实时字幕（语音识别）");
+
+        switchItem("启用实时字幕",
+                "只在单视频播放时生效：用 Whisper 在你手机上离线识别音轨，边看边出字幕。"
+                        + "四路同时播放时不可用（手机跑不动四路识别）",
+                prefs.asrEnabled(), v -> {
+                    prefs.setAsrEnabled(v);
+                    toast(v ? "已启用 —— 单独播一个视频时会自动出字幕" : "已关闭实时字幕");
+                });
+
+        List<AsrModels.Model> models = AsrModels.scan(this);
+        if (models.isEmpty()) {
+            row("还没有识别模型",
+                    "用文件管理器把 .bin 丢进 " + AsrModels.pathForDisplay(this)
+                            + " 就能被认出来；也可以点下面的「导入模型文件」");
+        } else {
+            final String[] names = new String[models.size()];
+            int sel = 0;
+            for (int i = 0; i < models.size(); i++) {
+                AsrModels.Model m = models.get(i);
+                names[i] = m.name + "（" + m.sizeText() + "）";
+                if (m.name.equals(prefs.asrModel())) sel = i;
+            }
+            final List<AsrModels.Model> list = models;
+            choice("识别模型", "手机上 Tiny / Base 才跟得上实时；Small 以上建议只当离线转写用",
+                    names, sel, i -> {
+                        prefs.setAsrModel(list.get(i).name);
+                        // 换模型要把缓存的上下文放掉，否则内存里会压着两套权重
+                        AsrWorker.releaseAll();
+                    });
+        }
+
+        choice("识别语言", "「自动」让 Whisper 自己判断，一般够用；知道语言时指定会更准",
+                AsrModels.LANG_NAMES, asrLangIndex(), i -> {
+                    prefs.setAsrLanguage(AsrModels.LANGS[i]);
+                    AsrWorker.releaseAll();
+                });
+
+        choice("字幕翻译", "Whisper 的翻译任务只有「任意语言 → 英文」这一种，出不了中文。"
+                        + "要中文得另接翻译引擎（见 README 的说明）",
+                new String[]{"不翻译（原文）", "翻成英文"}, prefs.asrTranslate() ? 1 : 0,
+                i -> prefs.setAsrTranslate(i == 1));
+
+        choice("推理线程数", "4 是稳妥值。调高收益递减，还会跟视频解码抢大核",
+                ASR_THREADS, asrThreadIndex(), i -> prefs.setAsrThreads(Integer.parseInt(ASR_THREADS[i])));
+
+        action("导入模型文件", "挑 .bin / .gguf 文件，应用会把它拷进自己的模型目录",
+                this::pickModelFiles);
+
+        action("复制模型目录路径", AsrModels.rootDir(this).getAbsolutePath(),
+                () -> copyToClipboard(AsrModels.rootDir(this).getAbsolutePath()));
+
+        section("推荐模型（点一下打开下载页）");
+        for (AsrModels.Rec rec : AsrModels.RECOMMENDED) {
+            LinearLayout r = row(rec.label, rec.size + " · " + rec.note);
+            TextView arrow = new TextView(this);
+            arrow.setText("  ›");
+            arrow.setTextColor(MUTED);
+            arrow.setTextSize(15);
+            r.addView(arrow);
+            r.setOnClickListener(v -> openUrl(rec.url));
+        }
 
         section("媒体库");
 
@@ -547,6 +614,124 @@ public class SettingsActivity extends AppCompatActivity {
         r.addView(col, new LinearLayout.LayoutParams(0, -2, 1f));
         container.addView(r);
         return r;
+    }
+
+    // -------------------------------------------------------- 语音识别（实时字幕）
+
+    // 语言档位定义在 AsrModels 里 —— 播放页的字幕弹窗也要用同一份，避免两处漂移
+    private static final String[] ASR_THREADS = {"1", "2", "3", "4", "6", "8"};
+    private static final int REQ_PICK_MODEL = 2001;
+
+    private int asrLangIndex() {
+        return AsrModels.langIndex(prefs.asrLanguage());
+    }
+
+    private int asrThreadIndex() {
+        String cur = String.valueOf(prefs.asrThreads());
+        for (int i = 0; i < ASR_THREADS.length; i++) {
+            if (ASR_THREADS[i].equals(cur)) return i;
+        }
+        return 3;   // 默认 4 线程
+    }
+
+    /** 挑模型文件。用 SAF，不需要任何存储权限。 */
+    private void pickModelFiles() {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType("*/*");
+        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        try {
+            startActivityForResult(i, REQ_PICK_MODEL);
+        } catch (Throwable t) {
+            toast("这台设备没有可用的文件选择器");
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQ_PICK_MODEL || resultCode != RESULT_OK || data == null) return;
+
+        List<Uri> uris = new ArrayList<>();
+        ClipData clip = data.getClipData();
+        if (clip != null) {
+            for (int i = 0; i < clip.getItemCount(); i++) {
+                Uri u = clip.getItemAt(i).getUri();
+                if (u != null) uris.add(u);
+            }
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        if (!uris.isEmpty()) importModelFiles(uris);
+    }
+
+    /** 把选中的文件拷进模型目录。几百 MB 的模型要拷几十秒，所以放后台线程。 */
+    private void importModelFiles(List<Uri> uris) {
+        toast("开始导入 " + uris.size() + " 个文件…");
+        final java.io.File dir = AsrModels.rootDir(this);
+        new Thread(() -> {
+            int ok = 0;
+            for (Uri u : uris) {
+                String name = fileNameOf(u);
+                if (name == null || name.isEmpty()) continue;
+                java.io.File dst = new java.io.File(dir, name);
+                try (java.io.InputStream in = getContentResolver().openInputStream(u);
+                     java.io.OutputStream out = new java.io.FileOutputStream(dst)) {
+                    if (in == null) continue;
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                    ok++;
+                } catch (Throwable t) {
+                    Log.w("Settings", "导入失败: " + name, t);
+                }
+            }
+            final int done = ok;
+            runOnUiThread(() -> {
+                toast("已导入 " + done + " 个文件");
+                rebuildItems();
+            });
+        }, "asr-import").start();
+    }
+
+    private String fileNameOf(Uri u) {
+        try (android.database.Cursor c = getContentResolver()
+                .query(u, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) {
+                    String s = c.getString(idx);
+                    if (s != null && !s.isEmpty()) return s;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        String p = u.getLastPathSegment();
+        if (p == null) return null;
+        int slash = p.lastIndexOf('/');
+        return slash >= 0 ? p.substring(slash + 1) : p;
+    }
+
+    private void copyToClipboard(String text) {
+        try {
+            android.content.ClipboardManager cm =
+                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null) {
+                cm.setPrimaryClip(ClipData.newPlainText("path", text));
+                toast("路径已复制到剪贴板");
+            }
+        } catch (Throwable t) {
+            toast("复制失败：" + text);
+        }
+    }
+
+    private void openUrl(String url) {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch (Throwable t) {
+            copyToClipboard(url);
+            toast("没有可用浏览器，链接已复制");
+        }
     }
 
     private void switchItem(String title, String desc, boolean value, OnBool onChange) {

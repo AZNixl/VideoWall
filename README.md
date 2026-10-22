@@ -46,6 +46,9 @@
   | 顶栏额外两键 | **A-B 循环** ｜ **字幕** |
 
   多路播放时这些全部关闭 —— 四宫格里做全屏手势既没地方滑，也容易误触。
+- **实时语音字幕**（同样只在单视频时）：没有字幕文件也能看 —— 用 whisper.cpp 在你手机上
+  离线识别音轨，边看边出字幕。**识别跑在播放头前面 60 秒**，所以基本看不到"等字幕"。
+  实测 8 秒音频识别约 1.5 秒（5.5 倍实时）。模型自己下、自己放，见 §7。
 
 ### 界面
 
@@ -202,6 +205,15 @@ APK 里**没有 native 库**，所以不用配 NDK，任何 ABI 都能跑（见 
 > 它不在的话，Windows 上提交会把 `gradlew` 变成 CRLF，
 > Linux/macOS 执行时报 `bad interpreter`。
 
+### 实时字幕的 .so 是怎么来的
+
+`app/src/main/jniLibs/{arm64-v8a,armeabi-v7a}/libwhisper_jni.so` 是用 NDK 编的 whisper.cpp
+（约 2.8MB，两个 ABI 合计）。**源码和构建命令在 `tools/whisper-jni/`**，需要重编时按那里的注释走。
+
+之所以把产物提交进仓库、而不是接到 Gradle 的 `externalNativeBuild`：那样每次 CI 构建
+都要装 NDK 并重编一遍 ggml + whisper（几分钟），而且 AGP 自动下载 NDK 在 GitHub Actions 上不稳。
+提交预编译 .so 让 CI 完全不需要 NDK。
+
 ### 发布签名
 
 需要 JDK 17 + Android SDK（`compileSdk 36`，`build-tools 36.0.0`）。
@@ -248,6 +260,15 @@ CI 上让它签正式包，在仓库 Secrets 里加四个值：
   要按格式分别解析，本版没做。自动查找同名 `.srt` 只在文件已进媒体库、
   且当前权限看得到时才有效 —— Android 13+ 只授了 `READ_MEDIA_VIDEO` 时基本查不到，
   这时会弹系统文件选择器让你手动挑一个。编码按 UTF-8 试，失败转 GB18030（中文字幕常见 GBK）
+- **实时字幕的翻译只能出英文**：Whisper 的 `translate` 任务在预训练时就固定成
+  「任意语言 → 英文」，没有"翻成中文"这个选项。所以设置里只有「原文 / 英文」两档。
+  要中文得另接翻译引擎，两条路可选：
+  ① 端侧 MT 模型（Opus-MT / NLLB 的 ONNX）—— 要多引一个 onnxruntime（每个 ABI 15MB+）；
+  ② 在线翻译 API（OpenAI 兼容端点，用户自填 base URL / key / model）—— 体积零成本，
+  但字幕内容会发到第三方，必须显式开启。**本版都没做，只有 Whisper 内置的英文翻译。**
+- **实时字幕的模型要自己下**：`ggml-*.bin`（Tiny q5_1 约 32MB）从 hf-mirror 下，
+  丢进 `/sdcard/Android/media/com.aznixl.videowall/asr/` 即可（用文件管理器直接能进去）。
+  应用不代下 —— 你选哪个模型、放哪儿，自己说了算
 - 没有「1 主 3 副」布局
 - 每格可播放/暂停/seek/全屏，但**没有逐格音量**（要单独出声就切「单路」再点那一格）
 - **四路同时出声时未处理 `AudioManager` 音频焦点**：交给系统混音，能同时响；
