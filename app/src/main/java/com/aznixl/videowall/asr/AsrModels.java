@@ -61,6 +61,107 @@ public final class AsrModels {
         return rootDir(c).getAbsolutePath();
     }
 
+    // ---------------------------------------------------------------- 翻译模型（GGUF）
+
+    /**
+     * 本地翻译模型目录：<b>/sdcard/Android/media/&lt;包名&gt;/mt</b>
+     *
+     * <p>和识别模型分开放：翻译模型动辄 3–4.6GB，混在一个目录里用户自己也分不清。
+     */
+    public static File mtDir(Context c) {
+        File asrBase = rootDir(c).getParentFile();     // .../media/<pkg>
+        File dir = new File(asrBase, "mt");
+        if (!dir.exists() && !dir.mkdirs()) {
+            Log.w(TAG, "建不出翻译模型目录: " + dir);
+        }
+        return dir;
+    }
+
+    public static String mtPathForDisplay(Context c) {
+        return mtDir(c).getAbsolutePath();
+    }
+
+    /** 扫翻译模型（.gguf）。结构同 {@link #scan}：根目录直接放，或放子目录里。 */
+    public static List<Model> scanMt(Context c) {
+        List<Model> out = new ArrayList<>();
+        File root = mtDir(c);
+        File[] files = root.listFiles();
+        if (files == null) {
+            Log.w(TAG, "翻译模型目录读不了: " + root.getAbsolutePath());
+            return out;
+        }
+        for (File f : files) {
+            if (f.isFile() && isMtFile(f)) out.add(new Model(stripExt(f.getName()), f));
+        }
+        for (File f : files) {
+            if (!f.isDirectory()) continue;
+            File[] fs = f.listFiles();
+            if (fs == null) continue;
+            File best = null;
+            for (File x : fs) {
+                if (x.isFile() && isMtFile(x) && (best == null || x.length() > best.length())) best = x;
+            }
+            if (best != null) out.add(new Model(f.getName(), best));
+        }
+        Collections.sort(out, (a, b) -> a.name.compareToIgnoreCase(b.name));
+        return out;
+    }
+
+    public static Model findMt(Context c, String name) {
+        if (name == null || name.isEmpty()) return null;
+        for (Model m : scanMt(c)) {
+            if (m.name.equals(name)) return m;
+        }
+        return null;
+    }
+
+    public static Model firstMt(Context c) {
+        List<Model> all = scanMt(c);
+        return all.isEmpty() ? null : all.get(0);
+    }
+
+    private static boolean isMtFile(File f) {
+        String n = f.getName().toLowerCase();
+        return n.endsWith(".gguf") && f.length() > 10 * 1024 * 1024;
+    }
+
+    /**
+     * 推荐的本地翻译模型。体积是按 hf-mirror 上实测的（2026-10 查的）。
+     *
+     * <p>手机上唯一现实的用法是"批量生成翻译字幕"：7B 在骁龙 8 系上约 5–10 tok/s，
+     * 一句字幕 2–5 秒，整片要跑很久；实时那条只能靠领先 60 秒硬扛。
+     */
+    public static final class RecMt {
+        public final String label;
+        public final String fileName;
+        public final String size;
+        public final String note;
+        public final String url;
+
+        RecMt(String label, String fileName, String size, String note, String url) {
+            this.label = label;
+            this.fileName = fileName;
+            this.size = size;
+            this.note = note;
+            this.url = url;
+        }
+    }
+
+    public static final RecMt[] RECOMMENDED_MT = {
+            new RecMt("混元翻译 7B · Q4_K_M（推荐）",
+                    "Hunyuan-MT-7B.Q4_K_M.gguf", "4.6 GB",
+                    "Transub Player 用的就是这套。质量好，但手机上偏慢",
+                    "https://hf-mirror.com/mradermacher/Hunyuan-MT-7B-GGUF/resolve/main/Hunyuan-MT-7B.Q4_K_M.gguf"),
+            new RecMt("混元翻译 7B · Q3_K_S",
+                    "Hunyuan-MT-7B.Q3_K_S.gguf", "3.4 GB",
+                    "体积小一点，质量略降",
+                    "https://hf-mirror.com/mradermacher/Hunyuan-MT-7B-GGUF/resolve/main/Hunyuan-MT-7B.Q3_K_S.gguf"),
+            new RecMt("混元翻译 7B · Q2_K",
+                    "Hunyuan-MT-7B.Q2_K.gguf", "3.0 GB",
+                    "最小的 7B 量化，手机存储吃紧时用",
+                    "https://hf-mirror.com/mradermacher/Hunyuan-MT-7B-GGUF/resolve/main/Hunyuan-MT-7B.Q2_K.gguf"),
+    };
+
     public static final class Model {
         public final String name;
         public final File file;

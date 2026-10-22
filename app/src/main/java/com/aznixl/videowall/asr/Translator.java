@@ -30,7 +30,7 @@ import java.nio.charset.StandardCharsets;
  * <p>设计原则：**翻译永远不能拖累字幕**。任何失败都返回原文，
  * 不让用户因为网络问题连字幕都看不到。
  */
-public final class Translator {
+public final class Translator implements TrEngine {
 
     private static final String TAG = "AsrTranslator";
 
@@ -61,6 +61,7 @@ public final class Translator {
      *
      * @return 译文；任何失败都返回**原文**（宁可显示原文，也不要空字幕）
      */
+    @Override
     public String translate(String text) {
         if (text == null || text.trim().isEmpty()) return text;
         if (!isConfigured()) return text;

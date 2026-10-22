@@ -358,14 +358,46 @@ public final class Prefs {
     public static final int TR_NONE = 0;
     public static final int TR_WHISPER_EN = 1;
     public static final int TR_API = 2;
+    /** 本地 llama.cpp + GGUF 翻译模型（离线，慢但不出设备）。 */
+    public static final int TR_LOCAL = 3;
 
     public int asrTranslateMode() {
         int v = sp.getInt("asrTrMode", TR_NONE);
-        return (v >= 0 && v <= 2) ? v : TR_NONE;
+        return (v >= 0 && v <= 3) ? v : TR_NONE;
     }
 
     public void setAsrTranslateMode(int v) {
-        sp.edit().putInt("asrTrMode", Math.max(0, Math.min(2, v))).apply();
+        sp.edit().putInt("asrTrMode", Math.max(0, Math.min(3, v))).apply();
+    }
+
+    // ---- 本地翻译模型
+
+    /** 选中的 GGUF 文件名（{@code AsrModels.Model.name}）。空串 = 扫到的第一个。 */
+    public String mtModel() {
+        String s = sp.getString("mtModel", "");
+        return s == null ? "" : s;
+    }
+
+    public void setMtModel(String v) {
+        sp.edit().putString("mtModel", v == null ? "" : v).apply();
+    }
+
+    public int mtThreads() {
+        int v = sp.getInt("mtThreads", 4);
+        return Math.max(1, Math.min(8, v));
+    }
+
+    public void setMtThreads(int v) {
+        sp.edit().putInt("mtThreads", Math.max(1, Math.min(8, v))).apply();
+    }
+
+    /** 实时字幕是否也走本地翻译（默认关 —— 7B 在手机上实时很勉强）。 */
+    public boolean mtRealtime() {
+        return sp.getBoolean("mtRealtime", false);
+    }
+
+    public void setMtRealtime(boolean v) {
+        sp.edit().putBoolean("mtRealtime", v).apply();
     }
 
     // ---- 在线翻译接口（OpenAI 兼容）

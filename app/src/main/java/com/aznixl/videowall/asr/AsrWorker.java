@@ -62,8 +62,8 @@ public final class AsrWorker {
     private final String language;
     /** Whisper 内置翻译（只能出英文）。 */
     private final boolean translate;
-    /** 在线翻译（可以出中文）。null = 不翻。 */
-    private final Translator translator;
+    /** 翻译引擎（在线 API 或本地 GGUF）。null = 不翻。 */
+    private final TrEngine translator;
     private final int threads;
     private final Listener listener;
 
@@ -73,7 +73,7 @@ public final class AsrWorker {
     private Thread thread;
 
     public AsrWorker(Context ctx, Uri uri, File modelFile, String language, boolean translate,
-                     Translator translator, int threads, Listener listener) {
+                     TrEngine translator, int threads, Listener listener) {
         this.appCtx = ctx.getApplicationContext();
         this.uri = uri;
         this.modelFile = modelFile;

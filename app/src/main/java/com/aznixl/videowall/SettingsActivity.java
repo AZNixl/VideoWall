@@ -307,15 +307,17 @@ public class SettingsActivity extends AppCompatActivity {
                 });
 
         choice("字幕翻译",
-                "「英文」用 Whisper 自带翻译，离线但只能出英文（它的预训练任务固定如此）；"
-                        + "「中文」走在线接口，需要在下面填端点",
-                new String[]{"不翻译（原文）", "英文（离线，Whisper 内置）", "中文（在线接口）"},
+                "「英文」用 Whisper 自带翻译，离线但只能出英文；"
+                        + "「中文」两条路：在线接口（质量好、要联网）或本地模型（完全离线、但慢）",
+                new String[]{"不翻译（原文）", "英文（离线，Whisper 内置）",
+                        "中文（在线接口）", "中文（本地模型）"},
                 prefs.asrTranslateMode(),
                 i -> {
                     prefs.setAsrTranslateMode(i);
                     rebuildItems();
                 });
 
+        // ---- 在线接口
         textInput("翻译接口地址", "OpenAI 兼容的 base URL，例如 https://api.deepseek.com/v1",
                 prefs.trBase(), v -> {
                     prefs.setTrBase(v);
@@ -334,9 +336,52 @@ public class SettingsActivity extends AppCompatActivity {
                     rebuildItems();
                 });
 
+        // ---- 本地模型
+        List<AsrModels.Model> mtModels = AsrModels.scanMt(this);
+        if (mtModels.isEmpty()) {
+            row("还没有本地翻译模型",
+                    "把 .gguf 放进 " + AsrModels.mtPathForDisplay(this) + "（文件管理器能直接进）");
+        } else {
+            final String[] names = new String[mtModels.size()];
+            int sel = 0;
+            for (int i = 0; i < mtModels.size(); i++) {
+                AsrModels.Model m = mtModels.get(i);
+                names[i] = m.name + "（" + m.sizeText() + "）";
+                if (m.name.equals(prefs.mtModel())) sel = i;
+            }
+            final List<AsrModels.Model> list = mtModels;
+            choice("本地翻译模型", "7B 的 Q4_K_M 约 4.6GB，手机上翻一句 2–5 秒",
+                    names, sel, i -> {
+                        prefs.setMtModel(list.get(i).name);
+                        rebuildItems();
+                    });
+        }
+
+        choice("本地翻译线程数", "4 是稳妥值；调高会跟视频解码抢核",
+                ASR_THREADS, asrThreadIndex2(), i -> prefs.setMtThreads(Integer.parseInt(ASR_THREADS[i])));
+
+        switchItem("实时字幕也做翻译",
+                "关掉时翻译只用于「生成翻译字幕」这个批处理；"
+                        + "打开后实时字幕也会翻 —— 本地模型很慢，靠识别领先 60 秒硬扛",
+                prefs.mtRealtime(), prefs::setMtRealtime);
+
+        action("复制翻译模型目录路径", AsrModels.mtPathForDisplay(this),
+                () -> copyToClipboard(AsrModels.mtPathForDisplay(this)));
+
         row("隐私提示",
-                "选「中文（在线）」时，识别出的字幕文本会被发到上面那个接口地址。"
-                        + "不想让文本出设备，就用「原文」或「英文（离线）」");
+                "「中文（在线）」会把字幕文本发到上面那个接口；"
+                        + "「中文（本地）」和「英文（离线）」全程不出设备");
+
+        section("推荐本地翻译模型（点一下打开下载页）");
+        for (AsrModels.RecMt rec : AsrModels.RECOMMENDED_MT) {
+            LinearLayout r = row(rec.label, rec.size + " · " + rec.note);
+            TextView arrow = new TextView(this);
+            arrow.setText("  ›");
+            arrow.setTextColor(MUTED);
+            arrow.setTextSize(15);
+            r.addView(arrow);
+            r.setOnClickListener(v -> openUrl(rec.url));
+        }
 
         choice("推理线程数", "4 是稳妥值。调高收益递减，还会跟视频解码抢大核",
                 ASR_THREADS, asrThreadIndex(), i -> prefs.setAsrThreads(Integer.parseInt(ASR_THREADS[i])));
@@ -659,6 +704,14 @@ public class SettingsActivity extends AppCompatActivity {
             if (ASR_THREADS[i].equals(cur)) return i;
         }
         return 3;   // 默认 4 线程
+    }
+
+    private int asrThreadIndex2() {
+        String cur = String.valueOf(prefs.mtThreads());
+        for (int i = 0; i < ASR_THREADS.length; i++) {
+            if (ASR_THREADS[i].equals(cur)) return i;
+        }
+        return 3;
     }
 
     /** 挑模型文件。用 SAF，不需要任何存储权限。 */

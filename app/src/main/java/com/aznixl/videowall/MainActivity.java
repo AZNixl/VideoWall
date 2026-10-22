@@ -60,6 +60,8 @@ import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 import com.aznixl.videowall.asr.AsrModels;
 import com.aznixl.videowall.asr.AsrWorker;
+import com.aznixl.videowall.asr.LocalMt;
+import com.aznixl.videowall.asr.TrEngine;
 import com.aznixl.videowall.asr.Translator;
 
 import java.io.BufferedReader;
@@ -3123,12 +3125,12 @@ public class MainActivity extends AppCompatActivity {
             syncAsrInfo.run();
         }));
 
-        // 翻译档位。Whisper 自带的那档只能出英文；要中文得走在线接口。
+        // 翻译档位。Whisper 自带那档只能出英文；中文有两条路：在线接口 / 本地模型。
         box.addView(browseSection("翻译"));
         box.addView(chipRow(new RowState() {
             @Override
             public String[] labels() {
-                return new String[]{"原文", "英文（离线）", "中文（在线）"};
+                return new String[]{"原文", "英文\n(离线)", "中文\n(在线)", "中文\n(本地)"};
             }
 
             @Override
@@ -3142,10 +3144,32 @@ public class MainActivity extends AppCompatActivity {
                     prefs.trModel(), prefs.trTarget()).isConfigured()) {
                 toast("先去「设置 → 实时字幕 → 翻译接口」填端点和密钥");
             }
+            if (i == Prefs.TR_LOCAL && AsrModels.scanMt(MainActivity.this).isEmpty()) {
+                toast("先把 .gguf 放进 " + AsrModels.mtPathForDisplay(MainActivity.this));
+            }
             // 翻译方式变了必须重跑，已出的字幕作废
             stopAsr();
             syncAsr();
             syncAsrInfo.run();
+        }));
+
+        // 批量生成：把当前这套字幕整片翻一遍，存成 .srt，下次直接加载。
+        // 本地 7B 翻一句要 2–5 秒，整片得跑挺久 —— 所以做成"单独一次操作"，
+        // 不跟实时字幕绑在一起。
+        box.addView(browseSection("生成翻译字幕"));
+        box.addView(chipRow(new RowState() {
+            @Override
+            public String[] labels() {
+                return new String[]{"把当前字幕翻成中文并存成 .srt"};
+            }
+
+            @Override
+            public int selected() {
+                return 0;
+            }
+        }, i -> {
+            dlg.dismiss();
+            generateTranslatedSubtitle();
         }));
 
         TextView hint = new TextView(this);
@@ -3563,16 +3587,40 @@ public class MainActivity extends AppCompatActivity {
         return AsrModels.langIndex(prefs.asrLanguage());
     }
 
-    /** 在线翻译器。只在 TR_API 模式下返回非 null；没配好端点/密钥就返回 null（保持原文）。 */
-    private Translator buildTranslator() {
-        if (prefs.asrTranslateMode() != Prefs.TR_API) return null;
-        Translator t = new Translator(prefs.trBase(), prefs.trKey(),
-                prefs.trModel(), prefs.trTarget());
-        if (!t.isConfigured()) {
-            toast("翻译接口还没配好（设置 → 实时字幕 → 翻译接口）");
-            return null;
+    /**
+     * 按当前设置造翻译引擎。
+     *
+     * @return null 表示不翻译（原文 / Whisper 只出英文那档由 translate 布尔值管）
+     */
+    private TrEngine buildTranslator() {
+        int mode = prefs.asrTranslateMode();
+
+        if (mode == Prefs.TR_API) {
+            Translator t = new Translator(prefs.trBase(), prefs.trKey(),
+                    prefs.trModel(), prefs.trTarget());
+            if (!t.isConfigured()) {
+                toast("翻译接口还没配好（设置 → 实时字幕 → 翻译接口）");
+                return null;
+            }
+            return t;
         }
-        return t;
+
+        if (mode == Prefs.TR_LOCAL) {
+            AsrModels.Model m = prefs.mtModel().isEmpty()
+                    ? AsrModels.firstMt(this)
+                    : AsrModels.findMt(this, prefs.mtModel());
+            if (m == null) {
+                toast("还没有本地翻译模型。把 .gguf 放进 " + AsrModels.mtPathForDisplay(this));
+                return null;
+            }
+            LocalMt lm = new LocalMt(m.file, prefs.mtThreads(), prefs.trTarget());
+            if (!lm.isReady()) {
+                toast("本地翻译模型加载失败：" + m.name);
+                return null;
+            }
+            return lm;
+        }
+        return null;
     }
 
     /** 当前实际会用的模型名（没显式选过就是扫到的第一个）。 */
@@ -3625,12 +3673,151 @@ public class MainActivity extends AppCompatActivity {
      * 第一次改写前先把原文存在 {@link #asrSavedLabel}，停掉时还原。
      */
     private void showAsrStatusOnLabel() {
+        setChromeStatus("ASR " + asrStatus);
+    }
+
+    /** 往格子的信息行上挂一句状态（不新加控件）。 */
+    private void setChromeStatus(String s) {
         int idx = gestureCell();
         if (idx < 0 || idx >= MAX_CELLS) return;
         Cell c = cells[idx];
         if (c == null) return;
         if (asrSavedLabel == null) asrSavedLabel = c.nameLabel.getText().toString();
-        c.nameLabel.setText(asrSavedLabel + "  ·  ASR " + asrStatus);
+        c.nameLabel.setText(asrSavedLabel + "  ·  " + s);
+    }
+
+    // -------------------------------------------------- 批量生成翻译字幕
+
+    private volatile boolean subTrRunning;
+    private volatile boolean subTrCancel;
+
+    /**
+     * 把当前字幕整片翻成中文，写成 .srt 后直接加载。
+     *
+     * <p>源字幕优先取**外挂 SRT**，没有就用**实时识别的结果**。
+     *
+     * <p>为什么单独做成一次批处理、而不是只做实时翻译：本地 7B 翻一句要 2–5 秒，
+     * 整片几百句要跑很久 —— 当成"一次性任务，跑完存下来下次直接用"更诚实。
+     * 反过来，正因为有了这个，实时翻译不开也不影响正常看片。
+     */
+    private void generateTranslatedSubtitle() {
+        if (subTrRunning) {
+            subTrCancel = true;
+            toast("正在取消…");
+            return;
+        }
+
+        final List<long[]> times = new ArrayList<>();
+        final List<String> texts = new ArrayList<>();
+        if (!subCues.isEmpty()) {
+            times.addAll(subCues);
+            texts.addAll(subTexts);
+        } else if (!asrCues.isEmpty()) {
+            int i = 0;
+            for (AsrWorker.Cue c : asrCues) {
+                if (i++ >= 2000) break;         // 防呆：正常一部长片也就一两千条
+                times.add(new long[]{c.startMs, c.endMs});
+                texts.add(c.text);
+            }
+        }
+        if (texts.isEmpty()) {
+            toast("还没有字幕可翻：先加载字幕，或开着实时字幕看一段");
+            return;
+        }
+
+        final TrEngine engine = buildTranslator();
+        if (engine == null) {
+            toast("先选一种翻译方式（英文 / 在线 / 本地）");
+            return;
+        }
+
+        subTrRunning = true;
+        subTrCancel = false;
+        final int total = texts.size();
+        toast("开始翻译 " + total + " 条字幕 —— 本地模型会比较慢，可以先去干别的");
+        new Thread(() -> {
+            List<String> out = new ArrayList<>(total);
+            int changed = 0;
+            try {
+                for (int i = 0; i < total; i++) {
+                    if (subTrCancel) break;
+                    String src = texts.get(i);
+                    String tr = engine.translate(src);
+                    if (!tr.equals(src)) changed++;
+                    out.add(tr);
+                    if ((i + 1) % 10 == 0 || i + 1 == total) {
+                        final int done = i + 1;
+                        ui.post(() -> setChromeStatus("翻译字幕 " + done + "/" + total));
+                    }
+                }
+            } catch (Throwable t) {
+                Log.w(TAG, "批量翻译异常", t);
+            } finally {
+                engine.close();
+                subTrRunning = false;
+            }
+
+            if (out.isEmpty()) {
+                ui.post(() -> {
+                    restoreAsrLabel();
+                    toast("一条都没翻出来");
+                });
+                return;
+            }
+            final boolean cancelled = subTrCancel;
+            final int okCount = changed;
+            try {
+                java.io.File f = writeSrt(times.subList(0, out.size()), out);
+                ui.post(() -> {
+                    restoreAsrLabel();
+                    toast(cancelled
+                            ? "已取消，已翻的 " + okCount + " 条存成了 " + f.getName()
+                            : "翻译完成 " + okCount + "/" + total + " 条 → " + f.getName());
+                    loadSrt(Uri.fromFile(f));
+                });
+            } catch (Throwable t) {
+                Log.w(TAG, "写翻译字幕失败", t);
+                ui.post(() -> {
+                    restoreAsrLabel();
+                    toast("写文件失败：" + t.getMessage());
+                });
+            }
+        }, "sub-translate").start();
+    }
+
+    /** 写成 srt，放在应用自己的目录里（不需要任何存储权限）。 */
+    private java.io.File writeSrt(List<long[]> times, List<String> texts)
+            throws java.io.IOException {
+        java.io.File dir = new java.io.File(getFilesDir(), "subtitles");
+        if (!dir.exists() && !dir.mkdirs()) throw new java.io.IOException("建不出字幕目录");
+
+        int idx = gestureCell();
+        Cell c = (idx >= 0 && idx < MAX_CELLS) ? cells[idx] : null;
+        String base = (c != null && !c.name.isEmpty()) ? c.name : "subtitle";
+        int dot = base.lastIndexOf('.');
+        if (dot > 0) base = base.substring(0, dot);
+
+        java.io.File f = new java.io.File(dir, base + ".zh.srt");
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < texts.size(); i++) {
+            long[] r = times.get(i);
+            sb.append(i + 1).append('\n')
+                    .append(srtTime(r[0])).append(" --> ").append(srtTime(r[1])).append('\n')
+                    .append(texts.get(i)).append("\n\n");
+        }
+        try (java.io.FileWriter w = new java.io.FileWriter(f, false)) {
+            w.write(sb.toString());
+        }
+        Log.i(TAG, "翻译字幕已写入 " + f.getAbsolutePath() + "（" + texts.size() + " 条）");
+        return f;
+    }
+
+    private static String srtTime(long ms) {
+        long h = ms / 3600000;
+        long m = (ms % 3600000) / 60000;
+        long s = (ms % 60000) / 1000;
+        long msec = ms % 1000;
+        return String.format(java.util.Locale.ROOT, "%02d:%02d:%02d,%03d", h, m, s, msec);
     }
 
     private void restoreAsrLabel() {
